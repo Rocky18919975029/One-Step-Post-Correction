@@ -79,6 +79,7 @@ def naive_temp(p : AutoregressiveSampler, context, temp, seq_len):
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.eos_token_id,
         remove_invalid_values=True,
+        renormalize_logits=True,
         return_dict_in_generate=True,
         output_scores=True,
         output_logits=True,

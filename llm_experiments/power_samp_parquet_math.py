@@ -69,6 +69,18 @@ def get_input_device(model, fallback_device):
     return torch.device(fallback_device)
 
 
+def parse_torch_dtype(dtype):
+    if dtype == "auto":
+        return "auto"
+    if dtype == "bfloat16":
+        return torch.bfloat16
+    if dtype == "float16":
+        return torch.float16
+    if dtype == "float32":
+        return torch.float32
+    raise ValueError(f"Unsupported torch dtype: {dtype}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="../data/train.parquet")
@@ -85,6 +97,7 @@ def main():
     parser.add_argument("--max_examples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--prompt_source", type=str, default="question", choices=["question", "prompt"])
+    parser.add_argument("--torch_dtype", type=str, default="bfloat16", choices=["auto", "bfloat16", "float16", "float32"])
     args = parser.parse_args()
 
     if args.max_new_tokens % args.block_num != 0:
@@ -109,7 +122,7 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     hf_model = transformers.AutoModelForCausalLM.from_pretrained(
         model_str,
-        torch_dtype="auto",
+        torch_dtype=parse_torch_dtype(args.torch_dtype),
         device_map="auto",
         trust_remote_code=True,
     )
@@ -138,6 +151,7 @@ def main():
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
             remove_invalid_values=True,
+            renormalize_logits=True,
         )
         std_output = hf_model.generate(
             input_ids,
@@ -149,6 +163,7 @@ def main():
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
             remove_invalid_values=True,
+            renormalize_logits=True,
         )
         mcmc_output, _, _, acceptance_ratio = mcmc_power_samp(
             autoreg_sampler,
