@@ -105,8 +105,6 @@ def main():
 
     model_str = MODEL_NAME_BY_KEY[args.model]
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_str, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
     hf_model = transformers.AutoModelForCausalLM.from_pretrained(
         model_str,
         torch_dtype="auto",
@@ -121,34 +119,23 @@ def main():
         question = str(row["question"])
         correct_answer = str(row.get("gt_answer", row.get("answer", "")))
         input_text = build_input_text(row, args.model, tokenizer, args.cot, args.prompt_source)
-        model_inputs = tokenizer(input_text, return_tensors="pt")
-        model_inputs = {key: value.to(input_device) for key, value in model_inputs.items()}
-        input_ids = model_inputs["input_ids"]
-        attention_mask = model_inputs["attention_mask"]
+        input_ids = tokenizer.encode(input_text, return_tensors="pt").to(input_device)
         prefix = input_ids[0].detach().cpu().tolist()
 
         naive_temp_output = hf_model.generate(
             input_ids,
-            attention_mask=attention_mask,
             max_new_tokens=args.max_new_tokens,
             return_dict_in_generate=True,
             output_scores=True,
             do_sample=True,
             temperature=args.temperature,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            remove_invalid_values=True,
         )
         std_output = hf_model.generate(
             input_ids,
-            attention_mask=attention_mask,
             max_new_tokens=args.max_new_tokens,
             return_dict_in_generate=True,
             output_scores=True,
             do_sample=True,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            remove_invalid_values=True,
         )
         mcmc_output, _, _, acceptance_ratio = mcmc_power_samp(
             autoreg_sampler,

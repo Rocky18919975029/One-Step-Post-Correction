@@ -69,16 +69,13 @@ def naive_temp(p : AutoregressiveSampler, context, temp, seq_len):
     device = p.device
     tokenizer = p.tokenizer
     input_ids = torch.tensor([context], dtype=torch.long, device=device)
-    attention_mask = torch.ones_like(input_ids)
     output = p.model.generate(
         input_ids=input_ids,
-        attention_mask=attention_mask,
         max_new_tokens=seq_len - c,
         do_sample=True,
         temperature=temp,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.eos_token_id,
-        remove_invalid_values=True,
         return_dict_in_generate=True,
         output_scores=True,
         output_logits=True,
