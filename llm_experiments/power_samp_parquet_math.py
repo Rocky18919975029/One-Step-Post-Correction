@@ -59,16 +59,6 @@ def decode_ids(tokenizer, ids):
     return tokenizer.decode(ids, skip_special_tokens=True)
 
 
-def get_input_device(model, fallback_device):
-    if hasattr(model, "hf_device_map"):
-        for device in model.hf_device_map.values():
-            if device not in ("cpu", "disk"):
-                if isinstance(device, int):
-                    return torch.device(f"cuda:{device}")
-                return torch.device(device)
-    return torch.device(fallback_device)
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="../data/train.parquet")
@@ -110,8 +100,7 @@ def main():
         torch_dtype="auto",
         device_map="auto",
         trust_remote_code=True,
-    )
-    input_device = get_input_device(hf_model, args.device)
+    ).to(args.device)
     autoreg_sampler = AutoregressiveSampler(hf_model, tokenizer, args.device)
 
     results = []
@@ -119,7 +108,7 @@ def main():
         question = str(row["question"])
         correct_answer = str(row.get("gt_answer", row.get("answer", "")))
         input_text = build_input_text(row, args.model, tokenizer, args.cot, args.prompt_source)
-        input_ids = tokenizer.encode(input_text, return_tensors="pt").to(input_device)
+        input_ids = tokenizer.encode(input_text, return_tensors="pt").to(args.device)
         prefix = input_ids[0].detach().cpu().tolist()
 
         naive_temp_output = hf_model.generate(
