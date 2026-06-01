@@ -63,7 +63,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="../data/train.parquet")
     parser.add_argument("--save_str", type=str, default="results/parquet_train")
-    parser.add_argument("--model", type=str, default="qwen", choices=sorted(MODEL_NAME_BY_KEY))
+    parser.add_argument("--model", type=str, default="qwen_math", choices=sorted(MODEL_NAME_BY_KEY))
     parser.add_argument("--temperature", type=float, default=0.25)
     parser.add_argument("--cot", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--mcmc_steps", type=int, default=10)
