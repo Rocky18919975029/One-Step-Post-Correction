@@ -56,37 +56,3 @@ python llm_experiments/passk_math.py --folder=results/qwen_math/MATH
 ```
 The output is a plot of the pass@k performance. As with single-shot reasoning, ```eval_gpqa.py``` and ```eval_he.py``` are similar, but for the latter an additional ```--output_fname``` argument is required.
 
-## Parquet Math Train Set
-
-For a local math training set such as ```data/train.parquet```, run power sampling with:
-
-```bash
-cd llm_experiments
-python power_samp_parquet_math.py \
-  --data_path=../data/train.parquet \
-  --save_str=results/parquet_train \
-  --model=qwen_math \
-  --batch_idx=0 \
-  --shard_size=100 \
-  --seed=0
-```
-
-The script writes CSV files with standard sampling, temperature sampling, and MCMC power sampling outputs. It reuses the project sampler in ```power_samp_utils.py``` and the native math answer parser.
-
-Evaluate accuracy with:
-
-```bash
-PYTHONPATH=. python eval_parquet_math.py results/parquet_train/qwen_math
-```
-
-Evaluate pass@k across multiple seeds with:
-
-```bash
-PYTHONPATH=. python passk_parquet_math.py results/parquet_train/qwen_math --output_path results/parquet_train/qwen_math/passk.png
-```
-
-For Slurm runs, use:
-
-```bash
-sbatch llm_experiments/scripts/power_samp_parquet_math.sh
-```
