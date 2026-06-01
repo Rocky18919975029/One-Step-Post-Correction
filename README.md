@@ -1,4 +1,4 @@
-# Reasoning with Sampling
+# One-Step-Post-Correction
 
 
 ### [Paper](https://arxiv.org/abs/2510.14901) | [Project Page](https://aakaran.github.io/reasoning_with_sampling/)
@@ -6,7 +6,7 @@
 [![rws](teaser.png)](teaser.png)
 
 
-This repo contains the official PyTorch implementation of Reasoning with Sampling.
+This repo contains the PyTorch implementation for One-Step-Post-Correction, adapted from Reasoning with Sampling.
 > [**Reasoning with Sampling: Your Base Model is Smarter Than You Think**](https://arxiv.org/abs/2510.14901)<br>
 > [Aayush Karan](https://aakaran.github.io/), [Yilun Du](https://yilundu.github.io/)
 > <br>Harvard<br>
@@ -18,8 +18,8 @@ This repo contains the official PyTorch implementation of Reasoning with Samplin
 Run the following script to setup environment.
 
 ```bash
-git clone https://github.com/aakaran/reasoning-with-sampling.git
-cd reasoning-with-sampling
+git clone https://github.com/Rocky18919975029/One-Step-Post-Correction.git
+cd One-Step-Post-Correction
 conda env create -f environment.yml
 conda activate psamp
 ```
@@ -55,5 +55,4 @@ For pass@k performance, collect the .csv files across seeds in a folder again (e
 python llm_experiments/passk_math.py --folder=results/qwen_math/MATH
 ```
 The output is a plot of the pass@k performance. As with single-shot reasoning, ```eval_gpqa.py``` and ```eval_he.py``` are similar, but for the latter an additional ```--output_fname``` argument is required.
-
 

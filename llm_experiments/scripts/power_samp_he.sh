@@ -19,11 +19,11 @@ export HF_HUB_CACHE="$HF_HOME/hub"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export TRANSFORMERS_CACHE="$HF_HOME/models"
 
-export PYTHONPATH="$PYTHONPATH:{/path/to/reasoning-with-sampling/llm_experiments}"
+export PYTHONPATH="$PYTHONPATH:{/path/to/One-Step-Post-Correction/llm_experiments}"
 export HF_TOKEN={HF_TOKEN}
 
 source activate psamp
-cd /path/to/reasoning-with-sampling/llm_experiments
+cd /path/to/One-Step-Post-Correction/llm_experiments
 
 echo "Running shard BATCH_IDX=${BATCH_IDX} with SEED=${SEED} (task ${SLURM_ARRAY_TASK_ID})"
 python power_samp_he.py \
