@@ -20,7 +20,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import transformers
-from transformers import LogitsProcessor, LogitsProcessorList
 
 from grader_utils.parse_utils import parse_answer
 from constants import *
@@ -28,24 +27,6 @@ from constants import *
 ### DESCRIPTION ###
 # power sampling to sample from p^{alpha}, where p is the base model
 # takes in 1/alpha (temperature) as an argument (default 0.25), and mcmc_power_samp implements sampling from p^{alpha} 
-
-
-class StableLogitsProcessor(LogitsProcessor):
-    def __init__(self, clamp=60.0):
-        self.clamp = clamp
-
-    def __call__(self, input_ids, scores):
-        scores = torch.nan_to_num(
-            scores,
-            nan=0.0,
-            posinf=self.clamp,
-            neginf=-self.clamp,
-        )
-        return torch.clamp(scores, min=-self.clamp, max=self.clamp)
-
-
-def stable_logits_processor(clamp=60.0):
-    return LogitsProcessorList([StableLogitsProcessor(clamp=clamp)])
 
 
 class AutoregressiveSampler:
@@ -64,8 +45,6 @@ class AutoregressiveSampler:
         output = self.model(prefix_cond)
         logits = output.logits
         logits = logits[0, -1, :]
-        logits = torch.nan_to_num(logits, nan=0.0, posinf=60.0, neginf=-60.0)
-        logits = torch.clamp(logits, min=-60.0, max=60.0)
         probs = F.softmax(logits, dim=-1)
         return torch.log(probs)
 
@@ -101,7 +80,6 @@ def naive_temp(p : AutoregressiveSampler, context, temp, seq_len):
         pad_token_id=tokenizer.eos_token_id,
         remove_invalid_values=True,
         renormalize_logits=True,
-        logits_processor=stable_logits_processor(),
         return_dict_in_generate=True,
         output_scores=True,
         output_logits=True,
