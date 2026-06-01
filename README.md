@@ -65,7 +65,7 @@ cd llm_experiments
 python power_samp_parquet_math.py \
   --data_path=../data/train.parquet \
   --save_str=results/parquet_train \
-  --model=qwen_math \
+  --model=qwen \
   --batch_idx=0 \
   --shard_size=100 \
   --seed=0
@@ -76,13 +76,13 @@ The script writes CSV files with standard sampling, temperature sampling, and MC
 Evaluate accuracy with:
 
 ```bash
-PYTHONPATH=. python eval_parquet_math.py results/parquet_train/qwen_math
+PYTHONPATH=. python eval_parquet_math.py results/parquet_train/qwen
 ```
 
 Evaluate pass@k across multiple seeds with:
 
 ```bash
-PYTHONPATH=. python passk_parquet_math.py results/parquet_train/qwen_math --output_path results/parquet_train/qwen_math/passk.png
+PYTHONPATH=. python passk_parquet_math.py results/parquet_train/qwen --output_path results/parquet_train/qwen/passk.png
 ```
 
 For Slurm runs, use:

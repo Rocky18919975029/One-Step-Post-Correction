@@ -33,4 +33,4 @@ python power_samp_parquet_math.py \
   --mcmc_steps=10 \
   --temperature=0.25 \
   --seed="${SEED}" \
-  --model=qwen_math
+  --model=qwen
