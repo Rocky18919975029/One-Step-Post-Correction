@@ -9,7 +9,7 @@ import transformers
 from tqdm import tqdm
 
 from grader_utils.parse_utils import parse_answer
-from power_samp_utils import AutoregressiveSampler, format_prompt, mcmc_power_samp
+from power_samp_utils import AutoregressiveSampler, format_prompt, mcmc_power_samp, stable_logits_processor
 
 
 MODEL_NAME_BY_KEY = {
@@ -152,6 +152,7 @@ def main():
             eos_token_id=tokenizer.eos_token_id,
             remove_invalid_values=True,
             renormalize_logits=True,
+            logits_processor=stable_logits_processor(),
         )
         std_output = hf_model.generate(
             input_ids,
@@ -164,6 +165,7 @@ def main():
             eos_token_id=tokenizer.eos_token_id,
             remove_invalid_values=True,
             renormalize_logits=True,
+            logits_processor=stable_logits_processor(),
         )
         mcmc_output, _, _, acceptance_ratio = mcmc_power_samp(
             autoreg_sampler,
