@@ -12,6 +12,12 @@ import pandas as pd
 NUM_SHARDS = 5
 
 
+def print_progress_line(batch_idx, gpu, line):
+    if "Benchmark on MATH:" in line:
+        progress = line[line.rfind("Benchmark on MATH:"):].strip()
+        print(f"[shard {batch_idx} gpu {gpu}] {progress}", flush=True)
+
+
 def result_filename(model, mcmc_steps, temperature, batch_idx, seed):
     return (
         f"{model}_math_base_power_samp_results_"
@@ -62,17 +68,39 @@ def run_shard(args, gpu, batch_idx, output_dir, log_dir):
             command,
             cwd=Path(__file__).resolve().parent,
             env=env,
-            stdout=log_file,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
         )
-        while process.poll() is None:
-            time.sleep(args.status_interval)
-            elapsed_minutes = (time.monotonic() - started_at) / 60
-            print(
-                f"Shard {batch_idx}: running on GPU {gpu} "
-                f"({elapsed_minutes:.1f} minutes elapsed)",
-                flush=True,
-            )
+        line_buffer = ""
+        last_status_at = started_at
+        while True:
+            char = process.stdout.read(1)
+            if char:
+                log_file.write(char)
+                log_file.flush()
+                if char in ("\r", "\n"):
+                    print_progress_line(batch_idx, gpu, line_buffer)
+                    line_buffer = ""
+                else:
+                    line_buffer += char
+            elif process.poll() is not None:
+                break
+
+            now = time.monotonic()
+            if now - last_status_at >= args.status_interval:
+                elapsed_minutes = (now - started_at) / 60
+                print(
+                    f"[shard {batch_idx} gpu {gpu}] running "
+                    f"({elapsed_minutes:.1f} minutes elapsed)",
+                    flush=True,
+                )
+                last_status_at = now
+
+        if line_buffer:
+            print_progress_line(batch_idx, gpu, line_buffer)
+        process.wait()
 
     if process.returncode != 0:
         raise RuntimeError(
