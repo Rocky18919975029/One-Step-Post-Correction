@@ -2,6 +2,7 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -27,6 +28,7 @@ def run_shard(args, gpu, batch_idx, output_dir, log_dir):
         args.seed,
     )
     if result_path.exists() and not args.rerun:
+        print(f"Shard {batch_idx}: existing result found, skipping", flush=True)
         return batch_idx, gpu, result_path, "skipped"
 
     log_path = log_dir / f"seed_{args.seed}_shard_{batch_idx}_gpu_{gpu}.log"
@@ -48,17 +50,31 @@ def run_shard(args, gpu, batch_idx, output_dir, log_dir):
     ]
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = gpu
+    env["PYTHONUNBUFFERED"] = "1"
 
+    print(
+        f"Shard {batch_idx}: starting on GPU {gpu}; log: {log_path}",
+        flush=True,
+    )
+    started_at = time.monotonic()
     with log_path.open("w") as log_file:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=Path(__file__).resolve().parent,
             env=env,
             stdout=log_file,
             stderr=subprocess.STDOUT,
         )
+        while process.poll() is None:
+            time.sleep(args.status_interval)
+            elapsed_minutes = (time.monotonic() - started_at) / 60
+            print(
+                f"Shard {batch_idx}: running on GPU {gpu} "
+                f"({elapsed_minutes:.1f} minutes elapsed)",
+                flush=True,
+            )
 
-    if completed.returncode != 0:
+    if process.returncode != 0:
         raise RuntimeError(
             f"Shard {batch_idx} failed on GPU {gpu}. See {log_path}"
         )
@@ -117,6 +133,12 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.25)
     parser.add_argument("--save_str", type=Path, default=Path("results"))
     parser.add_argument("--rerun", action="store_true")
+    parser.add_argument(
+        "--status_interval",
+        type=int,
+        default=60,
+        help="Seconds between progress messages.",
+    )
     args = parser.parse_args()
 
     if args.gpus:
@@ -140,6 +162,7 @@ def main():
         gpu: list(range(gpu_index, NUM_SHARDS, len(gpus)))
         for gpu_index, gpu in enumerate(gpus)
     }
+    print(f"GPU assignment: {gpu_queues}", flush=True)
     with ThreadPoolExecutor(max_workers=min(len(gpus), NUM_SHARDS)) as executor:
         futures = {
             executor.submit(
