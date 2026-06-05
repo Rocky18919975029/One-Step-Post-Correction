@@ -42,7 +42,11 @@ if __name__ == "__main__":
     parser.add_argument("--seed", action = "store", type = int, default = 0)
     args = parser.parse_args()
 
-    random.seed(0)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
 
     model = args.model
@@ -165,7 +169,6 @@ if __name__ == "__main__":
 
 
         
-
 
 
 

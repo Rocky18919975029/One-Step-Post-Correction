@@ -34,6 +34,21 @@ sbatch llm_experiments/scripts/power_samp_math.sh
 ```
 The output is several .csv files (based on the shard and seed number) that store the response outputs, correct answers, original prompts, etc. 
 
+To run all five MATH500 shards across multiple GPUs and merge the results:
+
+```bash
+cd llm_experiments
+python run_math_multi_gpu.py --seed 0 --num_gpus 5
+```
+
+To select specific physical GPU IDs:
+
+```bash
+python run_math_multi_gpu.py --seed 0 --gpus 0,2,4,6
+```
+
+Each GPU runs at most one shard at a time. Per-shard logs and CSV files are stored under ```results/```, followed by one merged 500-row CSV.
+
 ## Evaluation
 **Single-shot Reasoning**
 
@@ -55,4 +70,3 @@ For pass@k performance, collect the .csv files across seeds in a folder again (e
 python llm_experiments/passk_math.py --folder=results/qwen_math/MATH
 ```
 The output is a plot of the pass@k performance. As with single-shot reasoning, ```eval_gpqa.py``` and ```eval_he.py``` are similar, but for the latter an additional ```--output_fname``` argument is required.
-
