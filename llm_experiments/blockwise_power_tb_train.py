@@ -381,6 +381,15 @@ def load_checkpoint_state(checkpoint_dir, optimizer=None, optimizer_device=None)
     return training_state["state"]
 
 
+def read_csv_if_nonempty(path):
+    if path.stat().st_size == 0:
+        return None
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return None
+
+
 def maybe_init_wandb(args, rank, resume_state):
     if not args.use_wandb or rank != 0:
         return None
@@ -696,17 +705,20 @@ def main():
         tokenizer.save_pretrained(output_dir / "final")
 
         metric_frames = [
-            pd.read_csv(path)
+            frame
             for path in sorted(output_dir.glob("metrics_rank*.csv"))
-            if path.stat().st_size > 0
+            for frame in [read_csv_if_nonempty(path)]
+            if frame is not None
         ]
-        pd.concat(metric_frames, ignore_index=True).to_csv(output_dir / "metrics.csv", index=False)
+        if metric_frames:
+            pd.concat(metric_frames, ignore_index=True).to_csv(output_dir / "metrics.csv", index=False)
 
         if args.save_samples:
             sample_frames = [
-                pd.read_csv(path)
+                frame
                 for path in sorted(output_dir.glob("samples_rank*.csv"))
-                if path.stat().st_size > 0
+                for frame in [read_csv_if_nonempty(path)]
+                if frame is not None
             ]
             if sample_frames:
                 pd.concat(sample_frames, ignore_index=True).to_csv(output_dir / "samples.csv", index=False)
