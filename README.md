@@ -107,6 +107,22 @@ Then inspect every block's inputs, outputs, rewards, and log probabilities:
 python inspect_blockwise_samples.py results/blockwise_tb_debug --show_examples 2
 ```
 
+For multi-GPU block-wise training, launch with DDP:
+
+```bash
+python run_blockwise_multi_gpu.py --gpus 0,1,2,3 -- \
+  --model qwen_math \
+  --max_examples 32 \
+  --num_blocks 16 \
+  --completions_per_prefix 2 \
+  --max_completion_tokens 512 \
+  --save_samples \
+  --save_every_block \
+  --output_dir results/blockwise_tb_ddp_32x16
+```
+
+Each GPU handles different prompts while synchronizing LoRA gradients. Rank-specific files are written as ```metrics_rank*.csv``` and ```samples_rank*.csv```, then rank 0 merges them into ```metrics.csv``` and ```samples.csv```.
+
 ## Evaluation
 **Single-shot Reasoning**
 

@@ -8,7 +8,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 import transformers
 from tqdm import tqdm
 
@@ -33,6 +35,32 @@ def seed_everything(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def init_distributed():
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size == 1:
+        return False, 0, 0, 1, None
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    rank = int(os.environ["RANK"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    return True, rank, local_rank, world_size, torch.device(f"cuda:{local_rank}")
+
+
+def cleanup_distributed(enabled):
+    if enabled:
+        dist.destroy_process_group()
+
+
+def unwrap_model(model):
+    return model.module if isinstance(model, DDP) else model
+
+
+def rank_print(rank, *args, **kwargs):
+    if rank == 0:
+        print(*args, **kwargs)
 
 
 def load_math_dataset(path):
@@ -66,7 +94,7 @@ def parse_torch_dtype(dtype):
     raise ValueError(f"Unsupported torch dtype: {dtype}")
 
 
-def load_lora_model(model_name, torch_dtype):
+def load_lora_model(model_name, torch_dtype, device=None):
     try:
         from peft import LoraConfig, TaskType, get_peft_model
     except ImportError as exc:
@@ -75,12 +103,19 @@ def load_lora_model(model_name, torch_dtype):
             "Install it in psamp with: pip install peft"
         ) from exc
 
-    base_model = transformers.AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=parse_torch_dtype(torch_dtype),
-        device_map="auto",
-        trust_remote_code=True,
-    )
+    if device is None:
+        base_model = transformers.AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=parse_torch_dtype(torch_dtype),
+            device_map="auto",
+            trust_remote_code=True,
+        )
+    else:
+        base_model = transformers.AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=parse_torch_dtype(torch_dtype),
+            trust_remote_code=True,
+        ).to(device)
     config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=16,
@@ -102,6 +137,7 @@ def load_lora_model(model_name, torch_dtype):
 
 
 def first_model_device(model):
+    model = unwrap_model(model)
     if hasattr(model, "hf_device_map"):
         for device in model.hf_device_map.values():
             if device not in ("cpu", "disk"):
@@ -134,6 +170,7 @@ def completion_logprob(model, sequences, prompt_lens, attention_masks, eos_token
 
 
 def sample_continuations(model, tokenizer, prefixes, max_new_tokens, temperature, num_return_sequences):
+    model = unwrap_model(model)
     pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
     tokenizer.padding_side = "left"
     encoded = tokenizer.pad(
@@ -220,11 +257,12 @@ def build_prefixes_for_block(model, tokenizer, input_ids_list, block_idx, block_
 def vargrad_tb_loss(model, tokenizer, sequences, prompt_lens, attention_masks, rewards, alpha, beta, num_return_sequences):
     logp_theta = completion_logprob(model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
 
-    if not hasattr(model, "disable_adapter"):
+    raw_model = unwrap_model(model)
+    if not hasattr(raw_model, "disable_adapter"):
         raise RuntimeError("Reference logprob requires a PEFT LoRA model with disable_adapter().")
     with torch.no_grad():
-        with model.disable_adapter():
-            logp_ref = completion_logprob(model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
+        with raw_model.disable_adapter():
+            logp_ref = completion_logprob(raw_model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
 
     log_reward_augmented_target = alpha * logp_ref + rewards / beta
     log_z_terms = alpha * logp_ref - logp_theta.detach() + rewards / beta
@@ -261,6 +299,7 @@ def main():
     parser.add_argument("--save_every_block", action="store_true")
     parser.add_argument("--save_samples", action="store_true")
     args = parser.parse_args()
+    distributed, rank, local_rank, world_size, distributed_device = init_distributed()
 
     if args.completions_per_prefix < 2:
         print(
@@ -269,17 +308,27 @@ def main():
             flush=True,
         )
 
-    seed_everything(args.seed)
+    seed_everything(args.seed + rank)
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if rank == 0:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    if distributed:
+        dist.barrier()
 
     model_name = MODEL_NAME_BY_KEY[args.model]
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = load_lora_model(model_name, args.torch_dtype)
+    model = load_lora_model(model_name, args.torch_dtype, distributed_device)
     model.train()
+    if distributed:
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=False,
+        )
     optimizer = torch.optim.AdamW(
         [param for param in model.parameters() if param.requires_grad],
         lr=args.lr,
@@ -297,6 +346,11 @@ def main():
         for epoch in range(args.epochs):
             order = list(range(len(dataset)))
             random.shuffle(order)
+            if distributed:
+                remainder = len(order) % world_size
+                if remainder:
+                    order.extend(order[: world_size - remainder])
+                order = order[rank::world_size]
             for start in tqdm(range(0, len(order), args.batch_size), desc=f"block {block_idx} epoch {epoch}"):
                 batch_indices = order[start:start + args.batch_size]
                 batch_inputs = [input_ids_list[idx] for idx in batch_indices]
@@ -350,6 +404,7 @@ def main():
                     "step": global_step,
                     "epoch": epoch,
                     "block_idx": block_idx,
+                    "rank": rank,
                     "loss": float(loss.detach().cpu()),
                     "reward_mean": float(rewards.mean().detach().cpu()),
                     "logp_theta_mean": float(logp_theta.mean().cpu()),
@@ -370,6 +425,7 @@ def main():
                                 "step": global_step,
                                 "epoch": epoch,
                                 "block_idx": block_idx,
+                                "rank": rank,
                                 "example_idx": example_idx,
                                 "sample_idx": sample_idx,
                                 "question": dataset[example_idx]["prompt"],
@@ -393,14 +449,40 @@ def main():
 
         if args.save_every_block:
             block_dir = output_dir / f"block_{block_idx}"
-            model.save_pretrained(block_dir)
-            tokenizer.save_pretrained(block_dir)
+            if rank == 0:
+                unwrap_model(model).save_pretrained(block_dir)
+                tokenizer.save_pretrained(block_dir)
+            if distributed:
+                dist.barrier()
 
-    model.save_pretrained(output_dir / "final")
-    tokenizer.save_pretrained(output_dir / "final")
-    pd.DataFrame(metrics).to_csv(output_dir / "metrics.csv", index=False)
+    pd.DataFrame(metrics).to_csv(output_dir / f"metrics_rank{rank}.csv", index=False)
     if args.save_samples:
-        pd.DataFrame(sample_records).to_csv(output_dir / "samples.csv", index=False)
+        pd.DataFrame(sample_records).to_csv(output_dir / f"samples_rank{rank}.csv", index=False)
+
+    if distributed:
+        dist.barrier()
+
+    if rank == 0:
+        unwrap_model(model).save_pretrained(output_dir / "final")
+        tokenizer.save_pretrained(output_dir / "final")
+
+        metric_frames = [
+            pd.read_csv(path)
+            for path in sorted(output_dir.glob("metrics_rank*.csv"))
+            if path.stat().st_size > 0
+        ]
+        pd.concat(metric_frames, ignore_index=True).to_csv(output_dir / "metrics.csv", index=False)
+
+        if args.save_samples:
+            sample_frames = [
+                pd.read_csv(path)
+                for path in sorted(output_dir.glob("samples_rank*.csv"))
+                if path.stat().st_size > 0
+            ]
+            if sample_frames:
+                pd.concat(sample_frames, ignore_index=True).to_csv(output_dir / "samples.csv", index=False)
+
+    cleanup_distributed(distributed)
 
 
 if __name__ == "__main__":
