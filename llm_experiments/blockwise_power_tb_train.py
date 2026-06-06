@@ -374,9 +374,18 @@ def main():
                                 "sample_idx": sample_idx,
                                 "question": dataset[example_idx]["prompt"],
                                 "correct_answer": answers[example_idx],
+                                "prefix_token_len": len(prefixes[local_idx]),
                                 "prefix_text": prefix_text,
+                                "completion_token_len": int(
+                                    completion_end(
+                                        sequences[flat_idx],
+                                        prompt_lens[flat_idx],
+                                        tokenizer.eos_token_id,
+                                    ) - prompt_lens[flat_idx]
+                                ),
                                 "completion": completions[flat_idx],
                                 "parsed_answer": parsed_answers[flat_idx],
+                                "has_boxed_answer": parsed_answers[flat_idx] is not None,
                                 "reward": rewards_cpu[flat_idx],
                                 "logp_theta": logp_theta_cpu[flat_idx],
                                 "logp_ref": logp_ref_cpu[flat_idx],

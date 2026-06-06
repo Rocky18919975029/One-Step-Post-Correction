@@ -86,6 +86,25 @@ The default block hyperparameters follow the sampling code: ```max_new_tokens=30
 
 When ```--save_samples``` is enabled, sampled completions are written to ```samples.csv``` with block index, example index, prefix text, completion text, parsed answer, reward, and reference/trainable log probabilities.
 
+For a small multi-block debug run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_train.py \
+  --model qwen_math \
+  --max_examples 2 \
+  --num_blocks 3 \
+  --completions_per_prefix 2 \
+  --max_completion_tokens 512 \
+  --save_samples \
+  --output_dir results/blockwise_tb_debug
+```
+
+Then inspect every block's inputs, outputs, rewards, and log probabilities:
+
+```bash
+python inspect_blockwise_samples.py results/blockwise_tb_debug --show_examples 2
+```
+
 ## Evaluation
 **Single-shot Reasoning**
 
