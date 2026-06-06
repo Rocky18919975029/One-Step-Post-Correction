@@ -178,6 +178,19 @@ def first_model_device(model):
     return next(model.parameters()).device
 
 
+def enable_gradient_checkpointing(model):
+    raw_model = unwrap_model(model)
+    if hasattr(raw_model, "config"):
+        raw_model.config.use_cache = False
+    if hasattr(raw_model, "enable_input_require_grads"):
+        raw_model.enable_input_require_grads()
+    if hasattr(raw_model, "gradient_checkpointing_enable"):
+        try:
+            raw_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        except TypeError:
+            raw_model.gradient_checkpointing_enable()
+
+
 def completion_end(seq, prompt_len, eos_token_id):
     eos_positions = (seq[prompt_len:] == eos_token_id).nonzero(as_tuple=False)
     if len(eos_positions) == 0:
@@ -230,15 +243,22 @@ def sample_continuations(model, tokenizer, prefixes, max_new_tokens, temperature
     input_device = first_model_device(model)
     encoded = {key: value.to(input_device) for key, value in encoded.items()}
     with torch.no_grad():
-        output = model.generate(
-            **encoded,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=temperature,
-            num_return_sequences=num_return_sequences,
-            eos_token_id=tokenizer.eos_token_id,
-            pad_token_id=pad_token_id,
-        )
+        original_use_cache = getattr(getattr(model, "config", None), "use_cache", None)
+        if hasattr(model, "config"):
+            model.config.use_cache = True
+        try:
+            output = model.generate(
+                **encoded,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=temperature,
+                num_return_sequences=num_return_sequences,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=pad_token_id,
+            )
+        finally:
+            if original_use_cache is not None and hasattr(model, "config"):
+                model.config.use_cache = original_use_cache
     prompt_lens = []
     expanded_left_pad_counts = []
     for left_pad_count in left_pad_counts:
@@ -504,15 +524,22 @@ def evaluate_model(model, tokenizer, eval_rows, args):
         input_ids = tokenizer.encode(prompt, return_tensors="pt").to(first_model_device(raw_model))
         attention_mask = torch.ones_like(input_ids)
         with torch.no_grad():
-            output = raw_model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=args.eval_max_new_tokens,
-                do_sample=args.eval_do_sample,
-                temperature=args.eval_temperature,
-                eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-            )
+            original_use_cache = getattr(getattr(raw_model, "config", None), "use_cache", None)
+            if hasattr(raw_model, "config"):
+                raw_model.config.use_cache = True
+            try:
+                output = raw_model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=args.eval_max_new_tokens,
+                    do_sample=args.eval_do_sample,
+                    temperature=args.eval_temperature,
+                    eos_token_id=tokenizer.eos_token_id,
+                    pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+                )
+            finally:
+                if original_use_cache is not None and hasattr(raw_model, "config"):
+                    raw_model.config.use_cache = original_use_cache
         completion = tokenizer.decode(output[0][input_ids.shape[1]:], skip_special_tokens=True)
         reward, parsed = score_completion(completion, row["answer"])
         rewards.append(reward)
@@ -548,6 +575,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--torch_dtype", type=str, default="bfloat16", choices=["auto", "bfloat16", "float16", "float32"])
+    parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--save_every_block", action="store_true")
     parser.add_argument("--save_samples", action="store_true")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None)
@@ -607,6 +635,8 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     model = load_lora_model(model_name, args.torch_dtype, distributed_device, adapter_path)
+    if args.gradient_checkpointing:
+        enable_gradient_checkpointing(model)
     model.train()
     if distributed:
         model = DDP(
