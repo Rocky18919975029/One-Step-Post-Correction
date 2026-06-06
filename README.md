@@ -66,7 +66,8 @@ CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_train.py \
   --max_examples 1 \
   --num_blocks 1 \
   --completions_per_prefix 1 \
-  --max_completion_tokens 64
+  --max_completion_tokens 64 \
+  --save_samples
 ```
 
 The script uses the existing MATH prompt format, boxed-answer parser, and math grader as the answer-correctness reward. It implements the manuscript's arithmetic-mean VarGrad estimate:
@@ -82,6 +83,8 @@ and the trajectory balance loss:
 ```
 
 The default block hyperparameters follow the sampling code: ```max_new_tokens=3072```, ```num_blocks=16```, and ```block_size=192```.
+
+When ```--save_samples``` is enabled, sampled completions are written to ```samples.csv``` with block index, example index, prefix text, completion text, parsed answer, reward, and reference/trainable log probabilities.
 
 ## Evaluation
 **Single-shot Reasoning**

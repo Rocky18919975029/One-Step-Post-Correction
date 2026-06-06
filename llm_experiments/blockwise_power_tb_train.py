@@ -170,7 +170,8 @@ def sample_continuations(model, tokenizer, prefixes, max_new_tokens, temperature
 
 def correctness_rewards(tokenizer, sequences, prompt_lens, answers, num_return_sequences):
     rewards = []
-    texts = []
+    completions = []
+    parsed_answers = []
     expanded_answers = []
     for answer in answers:
         expanded_answers.extend([answer] * num_return_sequences)
@@ -183,8 +184,13 @@ def correctness_rewards(tokenizer, sequences, prompt_lens, answers, num_return_s
         except Exception:
             reward = 0.0
         rewards.append(reward)
-        texts.append(completion)
-    return torch.tensor(rewards, dtype=torch.float32, device=sequences.device), texts
+        completions.append(completion)
+        parsed_answers.append(parsed)
+    return (
+        torch.tensor(rewards, dtype=torch.float32, device=sequences.device),
+        completions,
+        parsed_answers,
+    )
 
 
 def build_prefixes_for_block(model, tokenizer, input_ids_list, block_idx, block_size, temperature):
@@ -253,6 +259,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--torch_dtype", type=str, default="bfloat16", choices=["auto", "bfloat16", "float16", "float32"])
     parser.add_argument("--save_every_block", action="store_true")
+    parser.add_argument("--save_samples", action="store_true")
     args = parser.parse_args()
 
     seed_everything(args.seed)
@@ -277,6 +284,7 @@ def main():
     input_ids_list = [tokenizer.encode(prompt) for prompt in prompts]
 
     metrics = []
+    sample_records = []
     global_step = 0
     for epoch in range(args.epochs):
         order = list(range(len(dataset)))
@@ -307,7 +315,7 @@ def main():
                     temperature=args.temperature,
                     num_return_sequences=args.completions_per_prefix,
                 )
-                rewards, _ = correctness_rewards(
+                rewards, completions, parsed_answers = correctness_rewards(
                     tokenizer,
                     sequences,
                     prompt_lens,
@@ -343,6 +351,30 @@ def main():
                 metrics.append(record)
                 print(record, flush=True)
 
+                if args.save_samples:
+                    rewards_cpu = rewards.detach().cpu().tolist()
+                    logp_theta_cpu = logp_theta.detach().cpu().tolist()
+                    logp_ref_cpu = logp_ref.detach().cpu().tolist()
+                    for local_idx, example_idx in enumerate(batch_indices):
+                        prefix_text = tokenizer.decode(prefixes[local_idx], skip_special_tokens=True)
+                        for sample_idx in range(args.completions_per_prefix):
+                            flat_idx = local_idx * args.completions_per_prefix + sample_idx
+                            sample_records.append({
+                                "step": global_step,
+                                "epoch": epoch,
+                                "block_idx": block_idx,
+                                "example_idx": example_idx,
+                                "sample_idx": sample_idx,
+                                "question": dataset[example_idx]["prompt"],
+                                "correct_answer": answers[example_idx],
+                                "prefix_text": prefix_text,
+                                "completion": completions[flat_idx],
+                                "parsed_answer": parsed_answers[flat_idx],
+                                "reward": rewards_cpu[flat_idx],
+                                "logp_theta": logp_theta_cpu[flat_idx],
+                                "logp_ref": logp_ref_cpu[flat_idx],
+                            })
+
             if args.save_every_block:
                 block_dir = output_dir / f"epoch_{epoch}_block_{block_idx}"
                 model.save_pretrained(block_dir)
@@ -351,6 +383,8 @@ def main():
     model.save_pretrained(output_dir / "final")
     tokenizer.save_pretrained(output_dir / "final")
     pd.DataFrame(metrics).to_csv(output_dir / "metrics.csv", index=False)
+    if args.save_samples:
+        pd.DataFrame(sample_records).to_csv(output_dir / "samples.csv", index=False)
 
 
 if __name__ == "__main__":
