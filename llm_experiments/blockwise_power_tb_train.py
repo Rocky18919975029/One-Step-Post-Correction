@@ -140,16 +140,29 @@ def load_lora_model(model_name, torch_dtype, device=None, adapter_path=None):
 
         adapter_path = Path(adapter_path)
         adapter_weights = load_file(adapter_path / "adapter_model.safetensors")
-        load_result = model.load_state_dict(adapter_weights, strict=False)
-        unexpected = [key for key in load_result.unexpected_keys if "lora_" not in key]
-        if unexpected:
-            raise RuntimeError(f"Unexpected adapter keys while loading {adapter_path}: {unexpected}")
-        loaded_lora_keys = [
-            key for key in adapter_weights
-            if key not in load_result.unexpected_keys and "lora_" in key
-        ]
-        if not loaded_lora_keys:
+        model_keys = set(model.state_dict().keys())
+        mapped_weights = {}
+        unmatched_keys = []
+        for key, value in adapter_weights.items():
+            candidates = [
+                key,
+                key.replace(".lora_A.weight", ".lora_A.default.weight"),
+                key.replace(".lora_B.weight", ".lora_B.default.weight"),
+            ]
+            matched_key = next((candidate for candidate in candidates if candidate in model_keys), None)
+            if matched_key is None:
+                unmatched_keys.append(key)
+            else:
+                mapped_weights[matched_key] = value
+
+        if not mapped_weights:
             raise RuntimeError(f"No LoRA adapter weights were loaded from {adapter_path}")
+        if unmatched_keys:
+            print(
+                f"Warning: ignored {len(unmatched_keys)} unmatched adapter keys from {adapter_path}",
+                flush=True,
+            )
+        model.load_state_dict(mapped_weights, strict=False)
     model.print_trainable_parameters()
     return model
 
