@@ -49,6 +49,40 @@ python run_math_multi_gpu.py --seed 0 --gpus 0,2,4,6
 
 Each GPU runs at most one shard at a time. Per-shard logs and CSV files are stored under ```results/```, followed by one merged 500-row CSV.
 
+## Block-wise Power Distribution Matching
+
+To train the block-wise reward-augmented power distribution objective from the manuscript, first install LoRA support if it is not already present:
+
+```bash
+pip install peft
+```
+
+Then run a small smoke test:
+
+```bash
+cd llm_experiments
+CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_train.py \
+  --model qwen_math \
+  --max_examples 1 \
+  --num_blocks 1 \
+  --completions_per_prefix 1 \
+  --max_completion_tokens 64
+```
+
+The script uses the existing MATH prompt format, boxed-answer parser, and math grader as the answer-correctness reward. It implements the manuscript's arithmetic-mean VarGrad estimate:
+
+```text
+log Z_hat = mean_m(alpha log pi_ref - log pi_theta + reward / beta)
+```
+
+and the trajectory balance loss:
+
+```text
+(stopgrad(log Z_hat) + log pi_theta - alpha log pi_ref - reward / beta)^2
+```
+
+The default block hyperparameters follow the sampling code: ```max_new_tokens=3072```, ```num_blocks=16```, and ```block_size=192```.
+
 ## Evaluation
 **Single-shot Reasoning**
 
