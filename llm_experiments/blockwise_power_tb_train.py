@@ -463,6 +463,7 @@ def main():
     parser.add_argument("--model", type=str, default="qwen_math", choices=sorted(MODEL_NAME_BY_KEY))
     parser.add_argument("--max_examples", type=int, default=32)
     parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--micro_batch_size", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--block_size", type=int, default=192)
     parser.add_argument("--num_blocks", type=int, default=16)
@@ -499,6 +500,10 @@ def main():
             "VarGrad TB residual zero for each prefix. Use at least 2 for training.",
             flush=True,
         )
+    if args.micro_batch_size is None:
+        args.micro_batch_size = args.batch_size
+    if args.micro_batch_size < 1 or args.micro_batch_size > args.batch_size:
+        raise ValueError("--micro_batch_size must be between 1 and --batch_size.")
 
     seed_everything(args.seed + rank)
     output_dir = Path(args.output_dir)
@@ -571,101 +576,116 @@ def main():
                 order = order[rank::world_size]
             for start in tqdm(range(0, len(order), args.batch_size), desc=f"block {block_idx} epoch {epoch}"):
                 batch_indices = order[start:start + args.batch_size]
-                batch_inputs = [input_ids_list[idx] for idx in batch_indices]
-                batch_answers = [answers[idx] for idx in batch_indices]
-
-                prefixes = build_prefixes_for_block(
-                    model,
-                    tokenizer,
-                    batch_inputs,
-                    block_idx,
-                    args.block_size,
-                    args.temperature,
-                )
-                sequences, prompt_lens, attention_masks = sample_continuations(
-                    model,
-                    tokenizer,
-                    prefixes,
-                    max_new_tokens=(
-                        args.max_completion_tokens
-                        if args.max_completion_tokens is not None
-                        else max(args.max_new_tokens - (block_idx - 1) * args.block_size, 1)
-                    ),
-                    temperature=args.temperature,
-                    num_return_sequences=args.completions_per_prefix,
-                )
-                rewards, completions, parsed_answers = correctness_rewards(
-                    tokenizer,
-                    sequences,
-                    prompt_lens,
-                    batch_answers,
-                    args.completions_per_prefix,
-                )
-
-                loss, logp_theta, logp_ref = vargrad_tb_loss(
-                    model,
-                    tokenizer,
-                    sequences,
-                    prompt_lens,
-                    attention_masks,
-                    rewards,
-                    args.alpha,
-                    args.beta,
-                    args.completions_per_prefix,
-                )
                 optimizer.zero_grad(set_to_none=True)
-                loss.backward()
+                step_id = global_step + 1
+                total_sequences = len(batch_indices) * args.completions_per_prefix
+                loss_sum = 0.0
+                reward_sum = 0.0
+                logp_theta_sum = 0.0
+                logp_ref_sum = 0.0
+
+                for micro_start in range(0, len(batch_indices), args.micro_batch_size):
+                    micro_indices = batch_indices[micro_start:micro_start + args.micro_batch_size]
+                    batch_inputs = [input_ids_list[idx] for idx in micro_indices]
+                    batch_answers = [answers[idx] for idx in micro_indices]
+
+                    prefixes = build_prefixes_for_block(
+                        model,
+                        tokenizer,
+                        batch_inputs,
+                        block_idx,
+                        args.block_size,
+                        args.temperature,
+                    )
+                    sequences, prompt_lens, attention_masks = sample_continuations(
+                        model,
+                        tokenizer,
+                        prefixes,
+                        max_new_tokens=(
+                            args.max_completion_tokens
+                            if args.max_completion_tokens is not None
+                            else max(args.max_new_tokens - (block_idx - 1) * args.block_size, 1)
+                        ),
+                        temperature=args.temperature,
+                        num_return_sequences=args.completions_per_prefix,
+                    )
+                    rewards, completions, parsed_answers = correctness_rewards(
+                        tokenizer,
+                        sequences,
+                        prompt_lens,
+                        batch_answers,
+                        args.completions_per_prefix,
+                    )
+
+                    loss, logp_theta, logp_ref = vargrad_tb_loss(
+                        model,
+                        tokenizer,
+                        sequences,
+                        prompt_lens,
+                        attention_masks,
+                        rewards,
+                        args.alpha,
+                        args.beta,
+                        args.completions_per_prefix,
+                    )
+                    micro_sequences = len(micro_indices) * args.completions_per_prefix
+                    (loss * (micro_sequences / total_sequences)).backward()
+                    loss_sum += float(loss.detach().cpu()) * micro_sequences
+                    reward_sum += float(rewards.sum().detach().cpu())
+                    logp_theta_sum += float(logp_theta.sum().cpu())
+                    logp_ref_sum += float(logp_ref.sum().cpu())
+
+                    if args.save_samples:
+                        rewards_cpu = rewards.detach().cpu().tolist()
+                        logp_theta_cpu = logp_theta.detach().cpu().tolist()
+                        logp_ref_cpu = logp_ref.detach().cpu().tolist()
+                        for local_idx, example_idx in enumerate(micro_indices):
+                            prefix_text = tokenizer.decode(prefixes[local_idx], skip_special_tokens=True)
+                            for sample_idx in range(args.completions_per_prefix):
+                                flat_idx = local_idx * args.completions_per_prefix + sample_idx
+                                sample_records.append({
+                                    "step": step_id,
+                                    "epoch": epoch,
+                                    "block_idx": block_idx,
+                                    "rank": rank,
+                                    "example_idx": example_idx,
+                                    "sample_idx": sample_idx,
+                                    "question": dataset[example_idx]["prompt"],
+                                    "correct_answer": answers[example_idx],
+                                    "prefix_token_len": len(prefixes[local_idx]),
+                                    "prefix_text": prefix_text,
+                                    "completion_token_len": int(
+                                        completion_end(
+                                            sequences[flat_idx],
+                                            prompt_lens[flat_idx],
+                                            tokenizer.eos_token_id,
+                                        ) - prompt_lens[flat_idx]
+                                    ),
+                                    "completion": completions[flat_idx],
+                                    "parsed_answer": parsed_answers[flat_idx],
+                                    "has_boxed_answer": parsed_answers[flat_idx] is not None,
+                                    "reward": rewards_cpu[flat_idx],
+                                    "logp_theta": logp_theta_cpu[flat_idx],
+                                    "logp_ref": logp_ref_cpu[flat_idx],
+                                })
+
                 optimizer.step()
 
-                global_step += 1
+                global_step = step_id
                 record = {
                     "step": global_step,
                     "epoch": epoch,
                     "block_idx": block_idx,
                     "rank": rank,
-                    "loss": float(loss.detach().cpu()),
-                    "reward_mean": float(rewards.mean().detach().cpu()),
-                    "logp_theta_mean": float(logp_theta.mean().cpu()),
-                    "logp_ref_mean": float(logp_ref.mean().cpu()),
+                    "loss": loss_sum / total_sequences,
+                    "reward_mean": reward_sum / total_sequences,
+                    "logp_theta_mean": logp_theta_sum / total_sequences,
+                    "logp_ref_mean": logp_ref_sum / total_sequences,
                 }
                 metrics.append(record)
                 print(record, flush=True)
                 if wandb_run is not None:
                     wandb_run.log(record, step=global_step)
-
-                if args.save_samples:
-                    rewards_cpu = rewards.detach().cpu().tolist()
-                    logp_theta_cpu = logp_theta.detach().cpu().tolist()
-                    logp_ref_cpu = logp_ref.detach().cpu().tolist()
-                    for local_idx, example_idx in enumerate(batch_indices):
-                        prefix_text = tokenizer.decode(prefixes[local_idx], skip_special_tokens=True)
-                        for sample_idx in range(args.completions_per_prefix):
-                            flat_idx = local_idx * args.completions_per_prefix + sample_idx
-                            sample_records.append({
-                                "step": global_step,
-                                "epoch": epoch,
-                                "block_idx": block_idx,
-                                "rank": rank,
-                                "example_idx": example_idx,
-                                "sample_idx": sample_idx,
-                                "question": dataset[example_idx]["prompt"],
-                                "correct_answer": answers[example_idx],
-                                "prefix_token_len": len(prefixes[local_idx]),
-                                "prefix_text": prefix_text,
-                                "completion_token_len": int(
-                                    completion_end(
-                                        sequences[flat_idx],
-                                        prompt_lens[flat_idx],
-                                        tokenizer.eos_token_id,
-                                    ) - prompt_lens[flat_idx]
-                                ),
-                                "completion": completions[flat_idx],
-                                "parsed_answer": parsed_answers[flat_idx],
-                                "has_boxed_answer": parsed_answers[flat_idx] is not None,
-                                "reward": rewards_cpu[flat_idx],
-                                "logp_theta": logp_theta_cpu[flat_idx],
-                                "logp_ref": logp_ref_cpu[flat_idx],
-                            })
 
         if args.save_every_block:
             block_dir = output_dir / f"block_{block_idx}"

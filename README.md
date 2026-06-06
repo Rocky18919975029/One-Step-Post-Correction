@@ -130,6 +130,8 @@ python run_blockwise_multi_gpu.py --gpus 0,1,2,3 -- \
   --model qwen_math \
   --eval_data_path data/MATH500.json \
   --max_examples 32 \
+  --batch_size 4 \
+  --micro_batch_size 1 \
   --num_blocks 16 \
   --completions_per_prefix 2 \
   --max_completion_tokens 3072 \
@@ -152,6 +154,8 @@ python run_blockwise_multi_gpu.py --gpus 0,1,2,3 -- \
   --model qwen_math \
   --eval_data_path data/MATH500.json \
   --max_examples 32 \
+  --batch_size 4 \
+  --micro_batch_size 1 \
   --num_blocks 16 \
   --completions_per_prefix 2 \
   --max_completion_tokens 3072 \
