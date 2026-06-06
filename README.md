@@ -128,18 +128,19 @@ Optional experiment tracking, checkpoint resume, and block-end evaluation:
 ```bash
 python run_blockwise_multi_gpu.py --gpus 0,1,2,3 -- \
   --model qwen_math \
+  --eval_data_path data/MATH500.json \
   --max_examples 32 \
   --num_blocks 16 \
   --completions_per_prefix 2 \
-  --max_completion_tokens 512 \
+  --max_completion_tokens 3072 \
   --save_samples \
   --save_every_block \
   --eval_every_block \
   --eval_examples 32 \
+  --eval_max_new_tokens 3072 \
   --use_wandb \
   --wandb_project one-step-post-correction \
   --wandb_run_name blockwise-32x16 \
-  --wandb_log_checkpoints \
   --output_dir results/blockwise_tb_ddp_32x16
 ```
 
@@ -149,20 +150,22 @@ The latest stage-boundary checkpoint is stored in ```checkpoint_latest```. Resum
 python run_blockwise_multi_gpu.py --gpus 0,1,2,3 -- \
   --resume_from_checkpoint results/blockwise_tb_ddp_32x16/checkpoint_latest \
   --model qwen_math \
+  --eval_data_path data/MATH500.json \
   --max_examples 32 \
   --num_blocks 16 \
   --completions_per_prefix 2 \
-  --max_completion_tokens 512 \
+  --max_completion_tokens 3072 \
   --save_samples \
   --save_every_block \
   --eval_every_block \
   --eval_examples 32 \
+  --eval_max_new_tokens 3072 \
   --use_wandb \
   --wandb_resume allow \
   --output_dir results/blockwise_tb_ddp_32x16
 ```
 
-If the checkpoint has a wandb run id, the resumed run continues logging to the same wandb run. Checkpoints are uploaded as wandb artifacts when ```--wandb_log_checkpoints``` is set.
+If the checkpoint has a wandb run id, the resumed run continues logging to the same wandb run. Checkpoints are uploaded as wandb artifacts only when ```--wandb_log_checkpoints``` is set.
 
 ## Evaluation
 **Single-shot Reasoning**

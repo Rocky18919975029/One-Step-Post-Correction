@@ -458,6 +458,7 @@ def evaluate_model(model, tokenizer, eval_rows, args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="data/MATH500.json")
+    parser.add_argument("--eval_data_path", type=str, default="data/MATH500.json")
     parser.add_argument("--output_dir", type=str, default="results/blockwise_tb")
     parser.add_argument("--model", type=str, default="qwen_math", choices=sorted(MODEL_NAME_BY_KEY))
     parser.add_argument("--max_examples", type=int, default=32)
@@ -486,7 +487,7 @@ def main():
     parser.add_argument("--wandb_log_checkpoints", action="store_true")
     parser.add_argument("--eval_every_block", action="store_true")
     parser.add_argument("--eval_examples", type=int, default=32)
-    parser.add_argument("--eval_max_new_tokens", type=int, default=1024)
+    parser.add_argument("--eval_max_new_tokens", type=int, default=3072)
     parser.add_argument("--eval_temperature", type=float, default=0.25)
     parser.add_argument("--eval_do_sample", action="store_true")
     args = parser.parse_args()
@@ -551,7 +552,7 @@ def main():
         global_step = int(resume_state.get("global_step", 0))
 
     dataset = load_math_dataset(args.data_path)[: args.max_examples]
-    eval_rows = dataset[: args.eval_examples] if args.eval_every_block else []
+    eval_rows = load_math_dataset(args.eval_data_path)[: args.eval_examples] if args.eval_every_block else []
     prompts = [format_prompt(row["prompt"], args.model, tokenizer, cot=True) for row in dataset]
     answers = [str(row["answer"]) for row in dataset]
     input_ids_list = [tokenizer.encode(prompt) for prompt in prompts]
