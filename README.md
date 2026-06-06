@@ -84,6 +84,8 @@ and the trajectory balance loss:
 
 The default block hyperparameters follow the sampling code: ```max_new_tokens=3072```, ```num_blocks=16```, and ```block_size=192```.
 
+Training proceeds stage-by-stage: block ```k``` is trained for all requested epochs before moving to block ```k+1```, and the updated model is used to generate prefixes for the next stage.
+
 When ```--save_samples``` is enabled, sampled completions are written to ```samples.csv``` with block index, example index, prefix text, completion text, parsed answer, reward, and reference/trainable log probabilities.
 
 For a small multi-block debug run:

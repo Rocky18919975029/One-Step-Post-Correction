@@ -293,11 +293,11 @@ def main():
     metrics = []
     sample_records = []
     global_step = 0
-    for epoch in range(args.epochs):
-        order = list(range(len(dataset)))
-        random.shuffle(order)
-        for block_idx in range(1, args.num_blocks + 1):
-            for start in tqdm(range(0, len(order), args.batch_size), desc=f"epoch {epoch} block {block_idx}"):
+    for block_idx in range(1, args.num_blocks + 1):
+        for epoch in range(args.epochs):
+            order = list(range(len(dataset)))
+            random.shuffle(order)
+            for start in tqdm(range(0, len(order), args.batch_size), desc=f"block {block_idx} epoch {epoch}"):
                 batch_indices = order[start:start + args.batch_size]
                 batch_inputs = [input_ids_list[idx] for idx in batch_indices]
                 batch_answers = [answers[idx] for idx in batch_indices]
@@ -391,10 +391,10 @@ def main():
                                 "logp_ref": logp_ref_cpu[flat_idx],
                             })
 
-            if args.save_every_block:
-                block_dir = output_dir / f"epoch_{epoch}_block_{block_idx}"
-                model.save_pretrained(block_dir)
-                tokenizer.save_pretrained(block_dir)
+        if args.save_every_block:
+            block_dir = output_dir / f"block_{block_idx}"
+            model.save_pretrained(block_dir)
+            tokenizer.save_pretrained(block_dir)
 
     model.save_pretrained(output_dir / "final")
     tokenizer.save_pretrained(output_dir / "final")
