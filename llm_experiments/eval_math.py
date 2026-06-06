@@ -1,3 +1,4 @@
+import argparse
 import pandas as pd
 import json
 from pathlib import Path
@@ -7,7 +8,7 @@ from grader_utils.math_grader import grade_answer
 
 def safe_grade(ans, correct_ans):
     try:
-        return int(grade_answer(ans, correct_ans))
+        return int(grade_answer(str(ans), str(correct_ans)))
     except Exception:
         return 0
 
@@ -59,11 +60,49 @@ def math_results(fnames):
         "mcmc_acc": mcmc_acc,
     }
 
+
+def collect_fnames(path):
+    path = Path(path)
+    if path.is_file():
+        return [str(path)]
+    return sorted(
+        str(p)
+        for p in path.glob("*_math_base_power_samp_results_*.csv")
+        if "merged" not in p.name
+    )
+
+
+def verify_math_files(fnames):
+    if not fnames:
+        raise FileNotFoundError("No MATH shard CSV files found.")
+
+    total = 0
+    for fname in fnames:
+        df = pd.read_csv(fname)
+        total += len(df)
+        required = {
+            "question",
+            "correct_answer",
+            "naive_answer",
+            "std_answer",
+            "mcmc_answer",
+        }
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"{fname} is missing columns: {sorted(missing)}")
+        print(f"Verified {fname}: {len(df)} rows")
+
+    print(f"Verified total rows: {total}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("folder", type=str)
+    parser.add_argument("path", type=str)
+    parser.add_argument("--verify_only", action="store_true")
     args = parser.parse_args()
 
-    folder = Path(args.folder)
-    fnames = sorted(str(p) for p in folder.glob("*.csv"))
+    fnames = collect_fnames(args.path)
+    verify_math_files(fnames)
+    if args.verify_only:
+        raise SystemExit(0)
     math_results(fnames)

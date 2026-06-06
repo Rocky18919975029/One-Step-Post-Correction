@@ -55,7 +55,8 @@ Each GPU runs at most one shard at a time. Per-shard logs and CSV files are stor
 To grade the responses for single-shot reasoning, collect the .csv files for a given seed run in a folder (e.g. ```results/qwen_math/MATH```) and pass it into ```eval_math.py```:
 
 ```bash
-python llm_experiments/eval_math.py --folder=results/qwen_math/MATH
+cd llm_experiments
+PYTHONPATH=. python eval_math.py results/qwen_math
 ```
 
 ```eval_gpqa.py``` is similar, and for ```eval_he.py```, an additional ```--output_fname``` argument is required, as HumanEval collects all responses in a jsonl file (e.g. ```--output_fname=qwen_math_he```).

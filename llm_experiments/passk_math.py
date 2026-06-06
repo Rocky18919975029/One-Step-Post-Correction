@@ -1,4 +1,6 @@
+import argparse
 import os
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -13,7 +15,7 @@ _LAST_NUM_RE = re.compile(r"_(\d+)(?=\.[^.]+$)")
 
 def safe_grade_math(ans, correct_ans):
     try:
-        return int(grade_answer(ans, correct_ans))
+        return int(grade_answer(str(ans), str(correct_ans)))
     except Exception:
         return 0
 
@@ -102,5 +104,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     folder = Path(args.folder)
-    fnames = sorted(str(p) for p in folder.glob("*.csv"))
+    fnames = sorted(
+        str(p)
+        for p in folder.glob("*_math_base_power_samp_results_*.csv")
+        if "merged" not in p.name
+    )
     plot_passk(fnames)
