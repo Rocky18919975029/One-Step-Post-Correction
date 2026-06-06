@@ -200,6 +200,22 @@ def completion_logprob(model, sequences, prompt_lens, attention_masks, eos_token
     return torch.stack(losses)
 
 
+def completion_logprob_chunks(model, sequences, prompt_lens, attention_masks, eos_token_id, chunk_size):
+    chunks = []
+    for start in range(0, sequences.shape[0], chunk_size):
+        end = min(start + chunk_size, sequences.shape[0])
+        chunks.append(
+            completion_logprob(
+                model,
+                sequences[start:end],
+                prompt_lens[start:end],
+                attention_masks[start:end],
+                eos_token_id,
+            )
+        )
+    return torch.cat(chunks, dim=0)
+
+
 def sample_continuations(model, tokenizer, prefixes, max_new_tokens, temperature, num_return_sequences):
     model = unwrap_model(model)
     pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
@@ -294,27 +310,82 @@ def build_prefixes_for_block(model, tokenizer, input_ids_list, block_idx, block_
     return prefixes
 
 
-def vargrad_tb_loss(model, tokenizer, sequences, prompt_lens, attention_masks, rewards, alpha, beta, num_return_sequences):
-    logp_theta = completion_logprob(model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
-
+def vargrad_tb_loss(
+    model,
+    tokenizer,
+    sequences,
+    prompt_lens,
+    attention_masks,
+    rewards,
+    alpha,
+    beta,
+    num_return_sequences,
+    score_micro_batch_size=None,
+):
     raw_model = unwrap_model(model)
     if not hasattr(raw_model, "disable_adapter"):
         raise RuntimeError("Reference logprob requires a PEFT LoRA model with disable_adapter().")
-    with torch.no_grad():
-        with raw_model.disable_adapter():
-            logp_ref = completion_logprob(raw_model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
 
-    log_reward_augmented_target = alpha * logp_ref + rewards / beta
-    log_z_terms = alpha * logp_ref - logp_theta.detach() + rewards / beta
+    if score_micro_batch_size is None or score_micro_batch_size >= sequences.shape[0]:
+        logp_theta = completion_logprob(model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
+        with torch.no_grad():
+            with raw_model.disable_adapter():
+                logp_ref = completion_logprob(raw_model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
+
+        log_reward_augmented_target = alpha * logp_ref + rewards / beta
+        log_z_terms = alpha * logp_ref - logp_theta.detach() + rewards / beta
+        log_z_hat = log_z_terms.view(-1, num_return_sequences).mean(dim=1)
+        expanded_log_z_hat = log_z_hat.repeat_interleave(num_return_sequences)
+
+        loss = (
+            expanded_log_z_hat.detach()
+            + logp_theta
+            - log_reward_augmented_target.detach()
+        ).pow(2).mean()
+        return loss, logp_theta.detach(), logp_ref.detach()
+
+    score_micro_batch_size = max(1, int(score_micro_batch_size))
+    with torch.no_grad():
+        logp_theta_detached = completion_logprob_chunks(
+            model,
+            sequences,
+            prompt_lens,
+            attention_masks,
+            tokenizer.eos_token_id,
+            score_micro_batch_size,
+        ).detach()
+        with raw_model.disable_adapter():
+            logp_ref = completion_logprob_chunks(
+                raw_model,
+                sequences,
+                prompt_lens,
+                attention_masks,
+                tokenizer.eos_token_id,
+                score_micro_batch_size,
+            ).detach()
+
+    log_z_terms = alpha * logp_ref - logp_theta_detached + rewards / beta
     log_z_hat = log_z_terms.view(-1, num_return_sequences).mean(dim=1)
     expanded_log_z_hat = log_z_hat.repeat_interleave(num_return_sequences)
 
-    loss = (
-        expanded_log_z_hat.detach()
-        + logp_theta
-        - log_reward_augmented_target.detach()
-    ).pow(2).mean()
-    return loss, logp_theta.detach(), logp_ref.detach()
+    loss_terms = []
+    logp_theta_chunks = []
+    for start in range(0, sequences.shape[0], score_micro_batch_size):
+        end = min(start + score_micro_batch_size, sequences.shape[0])
+        logp_theta = completion_logprob(
+            model,
+            sequences[start:end],
+            prompt_lens[start:end],
+            attention_masks[start:end],
+            tokenizer.eos_token_id,
+        )
+        target = (alpha * logp_ref[start:end] + rewards[start:end] / beta).detach()
+        residual = expanded_log_z_hat[start:end].detach() + logp_theta - target
+        loss_terms.append(residual.pow(2))
+        logp_theta_chunks.append(logp_theta.detach())
+
+    loss = torch.cat(loss_terms, dim=0).mean()
+    return loss, torch.cat(logp_theta_chunks, dim=0), logp_ref.detach()
 
 
 def save_checkpoint(output_dir, model, tokenizer, optimizer, state, distributed):
@@ -464,6 +535,7 @@ def main():
     parser.add_argument("--max_examples", type=int, default=32)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--micro_batch_size", type=int, default=None)
+    parser.add_argument("--score_micro_batch_size", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--block_size", type=int, default=192)
     parser.add_argument("--num_blocks", type=int, default=16)
@@ -504,6 +576,8 @@ def main():
         args.micro_batch_size = args.batch_size
     if args.micro_batch_size < 1 or args.micro_batch_size > args.batch_size:
         raise ValueError("--micro_batch_size must be between 1 and --batch_size.")
+    if args.score_micro_batch_size is not None and args.score_micro_batch_size < 1:
+        raise ValueError("--score_micro_batch_size must be at least 1.")
 
     seed_everything(args.seed + rank)
     output_dir = Path(args.output_dir)
@@ -627,6 +701,7 @@ def main():
                         args.alpha,
                         args.beta,
                         args.completions_per_prefix,
+                        args.score_micro_batch_size,
                     )
                     micro_sequences = len(micro_indices) * args.completions_per_prefix
                     (loss * (micro_sequences / total_sequences)).backward()
