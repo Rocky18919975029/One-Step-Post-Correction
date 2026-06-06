@@ -262,6 +262,13 @@ def main():
     parser.add_argument("--save_samples", action="store_true")
     args = parser.parse_args()
 
+    if args.completions_per_prefix < 2:
+        print(
+            "Warning: completions_per_prefix < 2 makes the arithmetic-mean "
+            "VarGrad TB residual zero for each prefix. Use at least 2 for training.",
+            flush=True,
+        )
+
     seed_everything(args.seed)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

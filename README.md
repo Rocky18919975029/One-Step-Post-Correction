@@ -65,7 +65,7 @@ CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_train.py \
   --model qwen_math \
   --max_examples 1 \
   --num_blocks 1 \
-  --completions_per_prefix 1 \
+  --completions_per_prefix 2 \
   --max_completion_tokens 64 \
   --save_samples
 ```
