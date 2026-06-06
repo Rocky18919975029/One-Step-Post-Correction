@@ -96,7 +96,7 @@ def parse_torch_dtype(dtype):
 
 def load_lora_model(model_name, torch_dtype, device=None, adapter_path=None):
     try:
-        from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+        from peft import LoraConfig, TaskType, get_peft_model
     except ImportError as exc:
         raise ImportError(
             "blockwise_power_tb_train.py requires peft for LoRA training. "
@@ -116,25 +116,40 @@ def load_lora_model(model_name, torch_dtype, device=None, adapter_path=None):
             torch_dtype=parse_torch_dtype(torch_dtype),
             trust_remote_code=True,
         ).to(device)
+    config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
+    )
+    model = get_peft_model(base_model, config)
     if adapter_path is not None:
-        model = PeftModel.from_pretrained(base_model, adapter_path, is_trainable=True)
-    else:
-        config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            r=16,
-            lora_alpha=32,
-            lora_dropout=0.05,
-            target_modules=[
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "gate_proj",
-                "up_proj",
-                "down_proj",
-            ],
-        )
-        model = get_peft_model(base_model, config)
+        try:
+            from safetensors.torch import load_file
+        except ImportError as exc:
+            raise ImportError("Resume requires safetensors. Install it with: pip install safetensors") from exc
+
+        adapter_path = Path(adapter_path)
+        adapter_weights = load_file(adapter_path / "adapter_model.safetensors")
+        load_result = model.load_state_dict(adapter_weights, strict=False)
+        unexpected = [key for key in load_result.unexpected_keys if "lora_" not in key]
+        if unexpected:
+            raise RuntimeError(f"Unexpected adapter keys while loading {adapter_path}: {unexpected}")
+        loaded_lora_keys = [
+            key for key in adapter_weights
+            if key not in load_result.unexpected_keys and "lora_" in key
+        ]
+        if not loaded_lora_keys:
+            raise RuntimeError(f"No LoRA adapter weights were loaded from {adapter_path}")
     model.print_trainable_parameters()
     return model
 
