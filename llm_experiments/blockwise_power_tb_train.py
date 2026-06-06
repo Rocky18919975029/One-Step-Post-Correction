@@ -346,19 +346,36 @@ def save_checkpoint(output_dir, model, tokenizer, optimizer, state, distributed)
     tmp_dir.rename(checkpoint_dir)
 
 
-def load_checkpoint_state(checkpoint_dir, optimizer=None, map_location="cpu"):
+def move_optimizer_state_to_device(optimizer, device):
+    if device is None:
+        return
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
+
+
+def load_checkpoint_state(checkpoint_dir, optimizer=None, optimizer_device=None):
     checkpoint_dir = Path(checkpoint_dir)
     training_state = torch.load(
         checkpoint_dir / "training_state.pt",
-        map_location=map_location,
+        map_location="cpu",
         weights_only=False,
     )
     if optimizer is not None:
         optimizer.load_state_dict(training_state["optimizer"])
+        move_optimizer_state_to_device(optimizer, optimizer_device)
 
-    torch.set_rng_state(training_state["torch_rng_state"])
+    torch_rng_state = training_state["torch_rng_state"]
+    if torch_rng_state.device.type != "cpu":
+        torch_rng_state = torch_rng_state.cpu()
+    torch.set_rng_state(torch_rng_state)
     if torch.cuda.is_available() and training_state["cuda_rng_state_all"] is not None:
-        torch.cuda.set_rng_state_all(training_state["cuda_rng_state_all"])
+        cuda_rng_state_all = [
+            state.cpu() if torch.is_tensor(state) and state.device.type != "cpu" else state
+            for state in training_state["cuda_rng_state_all"]
+        ]
+        torch.cuda.set_rng_state_all(cuda_rng_state_all)
     np.random.set_state(training_state["numpy_rng_state"])
     random.setstate(training_state["python_rng_state"])
     return training_state["state"]
@@ -516,8 +533,11 @@ def main():
     start_block_idx = 1
     global_step = 0
     if args.resume_from_checkpoint:
-        resume_map_location = distributed_device if distributed_device is not None else "cpu"
-        resume_state = load_checkpoint_state(args.resume_from_checkpoint, optimizer, resume_map_location)
+        resume_state = load_checkpoint_state(
+            args.resume_from_checkpoint,
+            optimizer,
+            distributed_device,
+        )
         start_block_idx = int(resume_state.get("next_block_idx", 1))
         global_step = int(resume_state.get("global_step", 0))
 
