@@ -1,8 +1,8 @@
 import argparse
 import json
-import math
 import os
 import random
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -94,9 +94,9 @@ def parse_torch_dtype(dtype):
     raise ValueError(f"Unsupported torch dtype: {dtype}")
 
 
-def load_lora_model(model_name, torch_dtype, device=None):
+def load_lora_model(model_name, torch_dtype, device=None, adapter_path=None):
     try:
-        from peft import LoraConfig, TaskType, get_peft_model
+        from peft import LoraConfig, PeftModel, TaskType, get_peft_model
     except ImportError as exc:
         raise ImportError(
             "blockwise_power_tb_train.py requires peft for LoRA training. "
@@ -116,22 +116,25 @@ def load_lora_model(model_name, torch_dtype, device=None):
             torch_dtype=parse_torch_dtype(torch_dtype),
             trust_remote_code=True,
         ).to(device)
-    config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.05,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
-    )
-    model = get_peft_model(base_model, config)
+    if adapter_path is not None:
+        model = PeftModel.from_pretrained(base_model, adapter_path, is_trainable=True)
+    else:
+        config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=16,
+            lora_alpha=32,
+            lora_dropout=0.05,
+            target_modules=[
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ],
+        )
+        model = get_peft_model(base_model, config)
     model.print_trainable_parameters()
     return model
 
@@ -230,6 +233,15 @@ def correctness_rewards(tokenizer, sequences, prompt_lens, answers, num_return_s
     )
 
 
+def score_completion(completion, answer):
+    parsed = parse_answer(completion)
+    try:
+        reward = float(grade_answer(str(parsed), str(answer)))
+    except Exception:
+        reward = 0.0
+    return reward, parsed
+
+
 def build_prefixes_for_block(model, tokenizer, input_ids_list, block_idx, block_size, temperature):
     if block_idx == 1:
         return input_ids_list
@@ -277,6 +289,118 @@ def vargrad_tb_loss(model, tokenizer, sequences, prompt_lens, attention_masks, r
     return loss, logp_theta.detach(), logp_ref.detach()
 
 
+def save_checkpoint(output_dir, model, tokenizer, optimizer, state, distributed):
+    if distributed:
+        dist.barrier()
+
+    checkpoint_dir = Path(output_dir) / "checkpoint_latest"
+    tmp_dir = Path(output_dir) / "checkpoint_latest_tmp"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    unwrap_model(model).save_pretrained(tmp_dir / "adapter")
+    tokenizer.save_pretrained(tmp_dir / "adapter")
+    torch.save(
+        {
+            "optimizer": optimizer.state_dict(),
+            "state": state,
+            "torch_rng_state": torch.get_rng_state(),
+            "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "numpy_rng_state": np.random.get_state(),
+            "python_rng_state": random.getstate(),
+        },
+        tmp_dir / "training_state.pt",
+    )
+
+    if checkpoint_dir.exists():
+        shutil.rmtree(checkpoint_dir)
+    tmp_dir.rename(checkpoint_dir)
+
+
+def load_checkpoint_state(checkpoint_dir, optimizer=None, map_location="cpu"):
+    checkpoint_dir = Path(checkpoint_dir)
+    training_state = torch.load(
+        checkpoint_dir / "training_state.pt",
+        map_location=map_location,
+        weights_only=False,
+    )
+    if optimizer is not None:
+        optimizer.load_state_dict(training_state["optimizer"])
+
+    torch.set_rng_state(training_state["torch_rng_state"])
+    if torch.cuda.is_available() and training_state["cuda_rng_state_all"] is not None:
+        torch.cuda.set_rng_state_all(training_state["cuda_rng_state_all"])
+    np.random.set_state(training_state["numpy_rng_state"])
+    random.setstate(training_state["python_rng_state"])
+    return training_state["state"]
+
+
+def maybe_init_wandb(args, rank, resume_state):
+    if not args.use_wandb or rank != 0:
+        return None
+    try:
+        import wandb
+    except ImportError as exc:
+        raise ImportError("Install wandb first: pip install wandb") from exc
+
+    run_id = args.wandb_id or (resume_state or {}).get("wandb_id")
+    run = wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity or None,
+        name=args.wandb_run_name or None,
+        id=run_id,
+        resume=args.wandb_resume,
+        config=vars(args),
+    )
+    return run
+
+
+def wandb_log_checkpoint(run, checkpoint_dir):
+    if run is None:
+        return
+    import wandb
+
+    artifact = wandb.Artifact(f"{run.name or run.id}-checkpoint", type="checkpoint")
+    artifact.add_dir(str(checkpoint_dir))
+    run.log_artifact(artifact)
+
+
+def evaluate_model(model, tokenizer, eval_rows, args):
+    if not eval_rows:
+        return {}
+
+    raw_model = unwrap_model(model)
+    raw_model.eval()
+    rewards = []
+    boxed = []
+    for row in tqdm(eval_rows, desc="eval", leave=False):
+        prompt = format_prompt(row["prompt"], args.model, tokenizer, cot=True)
+        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(first_model_device(raw_model))
+        attention_mask = torch.ones_like(input_ids)
+        with torch.no_grad():
+            output = raw_model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=args.eval_max_new_tokens,
+                do_sample=args.eval_do_sample,
+                temperature=args.eval_temperature,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            )
+        completion = tokenizer.decode(output[0][input_ids.shape[1]:], skip_special_tokens=True)
+        reward, parsed = score_completion(completion, row["answer"])
+        rewards.append(reward)
+        boxed.append(parsed is not None)
+
+    raw_model.train()
+    return {
+        "eval/accuracy": float(np.mean(rewards)),
+        "eval/boxed_rate": float(np.mean(boxed)),
+        "eval/examples": len(eval_rows),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="data/MATH500.json")
@@ -298,6 +422,19 @@ def main():
     parser.add_argument("--torch_dtype", type=str, default="bfloat16", choices=["auto", "bfloat16", "float16", "float32"])
     parser.add_argument("--save_every_block", action="store_true")
     parser.add_argument("--save_samples", action="store_true")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None)
+    parser.add_argument("--use_wandb", action="store_true")
+    parser.add_argument("--wandb_project", type=str, default="one-step-post-correction")
+    parser.add_argument("--wandb_entity", type=str, default=None)
+    parser.add_argument("--wandb_run_name", type=str, default=None)
+    parser.add_argument("--wandb_id", type=str, default=None)
+    parser.add_argument("--wandb_resume", type=str, default="allow")
+    parser.add_argument("--wandb_log_checkpoints", action="store_true")
+    parser.add_argument("--eval_every_block", action="store_true")
+    parser.add_argument("--eval_examples", type=int, default=32)
+    parser.add_argument("--eval_max_new_tokens", type=int, default=1024)
+    parser.add_argument("--eval_temperature", type=float, default=0.25)
+    parser.add_argument("--eval_do_sample", action="store_true")
     args = parser.parse_args()
     distributed, rank, local_rank, world_size, distributed_device = init_distributed()
 
@@ -315,12 +452,27 @@ def main():
     if distributed:
         dist.barrier()
 
+    resume_state = None
+    adapter_path = None
+    if args.resume_from_checkpoint:
+        checkpoint_dir = Path(args.resume_from_checkpoint)
+        adapter_path = checkpoint_dir / "adapter"
+        resume_state = torch.load(
+            checkpoint_dir / "training_state.pt",
+            map_location="cpu",
+            weights_only=False,
+        )["state"]
+
+    wandb_run = maybe_init_wandb(args, rank, resume_state)
+    if rank == 0 and wandb_run is not None and args.wandb_id is None:
+        args.wandb_id = wandb_run.id
+
     model_name = MODEL_NAME_BY_KEY[args.model]
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = load_lora_model(model_name, args.torch_dtype, distributed_device)
+    model = load_lora_model(model_name, args.torch_dtype, distributed_device, adapter_path)
     model.train()
     if distributed:
         model = DDP(
@@ -333,16 +485,23 @@ def main():
         [param for param in model.parameters() if param.requires_grad],
         lr=args.lr,
     )
+    start_block_idx = 1
+    global_step = 0
+    if args.resume_from_checkpoint:
+        resume_map_location = distributed_device if distributed_device is not None else "cpu"
+        resume_state = load_checkpoint_state(args.resume_from_checkpoint, optimizer, resume_map_location)
+        start_block_idx = int(resume_state.get("next_block_idx", 1))
+        global_step = int(resume_state.get("global_step", 0))
 
     dataset = load_math_dataset(args.data_path)[: args.max_examples]
+    eval_rows = dataset[: args.eval_examples] if args.eval_every_block else []
     prompts = [format_prompt(row["prompt"], args.model, tokenizer, cot=True) for row in dataset]
     answers = [str(row["answer"]) for row in dataset]
     input_ids_list = [tokenizer.encode(prompt) for prompt in prompts]
 
     metrics = []
     sample_records = []
-    global_step = 0
-    for block_idx in range(1, args.num_blocks + 1):
+    for block_idx in range(start_block_idx, args.num_blocks + 1):
         for epoch in range(args.epochs):
             order = list(range(len(dataset)))
             random.shuffle(order)
@@ -412,6 +571,8 @@ def main():
                 }
                 metrics.append(record)
                 print(record, flush=True)
+                if wandb_run is not None:
+                    wandb_run.log(record, step=global_step)
 
                 if args.save_samples:
                     rewards_cpu = rewards.detach().cpu().tolist()
@@ -455,6 +616,26 @@ def main():
             if distributed:
                 dist.barrier()
 
+        if args.eval_every_block and rank == 0:
+            eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
+            eval_metrics = {**eval_metrics, "block_idx": block_idx, "step": global_step}
+            print(eval_metrics, flush=True)
+            if wandb_run is not None:
+                wandb_run.log(eval_metrics, step=global_step)
+
+        if rank == 0:
+            checkpoint_state = {
+                "next_block_idx": block_idx + 1,
+                "global_step": global_step,
+                "wandb_id": wandb_run.id if wandb_run is not None else args.wandb_id,
+                "args": vars(args),
+            }
+            save_checkpoint(output_dir, model, tokenizer, optimizer, checkpoint_state, distributed=False)
+            if args.wandb_log_checkpoints:
+                wandb_log_checkpoint(wandb_run, output_dir / "checkpoint_latest")
+        if distributed:
+            dist.barrier()
+
     pd.DataFrame(metrics).to_csv(output_dir / f"metrics_rank{rank}.csv", index=False)
     if args.save_samples:
         pd.DataFrame(sample_records).to_csv(output_dir / f"samples_rank{rank}.csv", index=False)
@@ -481,6 +662,9 @@ def main():
             ]
             if sample_frames:
                 pd.concat(sample_frames, ignore_index=True).to_csv(output_dir / "samples.csv", index=False)
+
+        if wandb_run is not None:
+            wandb_run.finish()
 
     cleanup_distributed(distributed)
 
