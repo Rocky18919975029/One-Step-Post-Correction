@@ -558,6 +558,7 @@ def main():
 
     metrics = []
     sample_records = []
+    eval_records = []
     for block_idx in range(start_block_idx, args.num_blocks + 1):
         for epoch in range(args.epochs):
             order = list(range(len(dataset)))
@@ -676,6 +677,7 @@ def main():
         if args.eval_every_block and rank == 0:
             eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
             eval_metrics = {**eval_metrics, "block_idx": block_idx, "step": global_step}
+            eval_records.append(eval_metrics)
             print(eval_metrics, flush=True)
             if wandb_run is not None:
                 wandb_run.log(eval_metrics, step=global_step)
@@ -696,6 +698,8 @@ def main():
     pd.DataFrame(metrics).to_csv(output_dir / f"metrics_rank{rank}.csv", index=False)
     if args.save_samples:
         pd.DataFrame(sample_records).to_csv(output_dir / f"samples_rank{rank}.csv", index=False)
+    if rank == 0 and eval_records:
+        pd.DataFrame(eval_records).to_csv(output_dir / "eval_metrics.csv", index=False)
 
     if distributed:
         dist.barrier()
