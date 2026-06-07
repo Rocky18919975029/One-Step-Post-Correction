@@ -467,7 +467,26 @@ def load_checkpoint_state(checkpoint_dir, optimizer=None, optimizer_device=None)
             state.cpu() if torch.is_tensor(state) and state.device.type != "cpu" else state
             for state in training_state["cuda_rng_state_all"]
         ]
-        torch.cuda.set_rng_state_all(cuda_rng_state_all)
+        visible_device_count = torch.cuda.device_count()
+        saved_device_count = len(cuda_rng_state_all)
+        if visible_device_count == saved_device_count:
+            torch.cuda.set_rng_state_all(cuda_rng_state_all)
+        else:
+            restore_count = min(visible_device_count, saved_device_count)
+            if restore_count == 0:
+                print(
+                    "Warning: checkpoint contains CUDA RNG state, but no visible CUDA devices are available for restore.",
+                    flush=True,
+                )
+            else:
+                print(
+                    "Warning: checkpoint CUDA RNG state count "
+                    f"({saved_device_count}) does not match visible CUDA device count "
+                    f"({visible_device_count}); restoring the first {restore_count} state(s).",
+                    flush=True,
+                )
+                for device_idx in range(restore_count):
+                    torch.cuda.set_rng_state(cuda_rng_state_all[device_idx], device_idx)
     np.random.set_state(training_state["numpy_rng_state"])
     random.setstate(training_state["python_rng_state"])
     return training_state["state"]
