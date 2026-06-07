@@ -182,6 +182,12 @@ def apply_smoke_defaults(args):
         args.eval_examples = 10
     if args.vllm_batch_size is None:
         args.vllm_batch_size = 2
+    if args.score_micro_batch_size is None:
+        args.score_micro_batch_size = 1
+    args.gradient_checkpointing = True
+    args.save_samples = True
+    args.save_every_block = True
+    args.vllm_enforce_eager = True
 
 
 def fill_defaults(args):
@@ -249,6 +255,7 @@ def main():
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = args.gpu
     env["PYTHONUNBUFFERED"] = "1"
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     start_block = read_next_block_idx(output_dir)
     if start_block > args.num_blocks:
