@@ -52,9 +52,10 @@ def clear_cuda():
 
 
 def sync_point(distributed, local_rank, rank, label):
-    rank_print(rank, label, flush=True)
+    print(f"[rank{rank}] {label} (pre-barrier)", flush=True)
     if distributed:
         dist.barrier(device_ids=[local_rank])
+    print(f"[rank{rank}] {label} (post-barrier)", flush=True)
 
 
 def load_vllm(model_name, args, adapter_path=None):
@@ -488,11 +489,11 @@ def main():
         buffer_path = output_dir / "buffers" / f"block_{block_idx}.csv"
         if not buffer_path.exists():
             raise FileNotFoundError(f"Missing sampled buffer for block {block_idx}: {buffer_path}")
-        rank_print(rank, f"[block {block_idx}] loading buffer from {buffer_path}", flush=True)
+        print(f"[rank{rank}] [block {block_idx}] loading buffer from {buffer_path}", flush=True)
         buffer_df = pd.read_csv(buffer_path)
-        rank_print(rank, f"[block {block_idx}] loaded {len(buffer_df)} buffered samples", flush=True)
+        print(f"[rank{rank}] [block {block_idx}] loaded {len(buffer_df)} buffered samples", flush=True)
 
-        rank_print(rank, f"[block {block_idx}] loading train model", flush=True)
+        print(f"[rank{rank}] [block {block_idx}] loading train model", flush=True)
         model = load_lora_model(model_name, args.torch_dtype, distributed_device, stage_adapter_path)
         if args.gradient_checkpointing:
             enable_gradient_checkpointing(model)
@@ -509,10 +510,13 @@ def main():
             lr=args.lr,
         )
         if args.resume_from_checkpoint and block_idx == start_block_idx:
-            rank_print(rank, f"[block {block_idx}] restoring optimizer and RNG from {args.resume_from_checkpoint}", flush=True)
+            print(
+                f"[rank{rank}] [block {block_idx}] restoring optimizer and RNG from {args.resume_from_checkpoint}",
+                flush=True,
+            )
             load_checkpoint_state(args.resume_from_checkpoint, optimizer, distributed_device)
 
-        rank_print(rank, f"[block {block_idx}] starting training loop", flush=True)
+        print(f"[rank{rank}] [block {block_idx}] starting training loop", flush=True)
         global_step = train_stage_from_buffer(
             model,
             tokenizer,
