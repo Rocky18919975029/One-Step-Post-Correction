@@ -202,6 +202,7 @@ python run_blockwise_buffer_multi_gpu.py --gpus 0,1 -- \
   --eval_every_block \
   --eval_examples 100 \
   --eval_max_new_tokens 3072 \
+  --vllm_batch_size 8 \
   --ddp_timeout_minutes 120 \
   --use_wandb \
   --wandb_run_name buffer-small-qwen-seed0 \

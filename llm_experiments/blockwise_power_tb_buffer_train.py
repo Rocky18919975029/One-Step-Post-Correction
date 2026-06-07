@@ -48,14 +48,13 @@ def clear_cuda():
         torch.cuda.ipc_collect()
 
 
-def vllm_generate_texts(model_name, prompts, args, adapter_path=None, max_tokens=None, n=1):
+def load_vllm(model_name, args, adapter_path=None):
     try:
         from vllm import LLM, SamplingParams
         from vllm.lora.request import LoRARequest
     except ImportError as exc:
         raise ImportError("Install vLLM in the psamp environment to use buffer sampling.") from exc
 
-    max_tokens = args.max_completion_tokens if max_tokens is None else max_tokens
     llm_kwargs = {
         "model": model_name,
         "trust_remote_code": True,
@@ -66,49 +65,64 @@ def vllm_generate_texts(model_name, prompts, args, adapter_path=None, max_tokens
         "max_model_len": args.vllm_max_model_len,
     }
     llm = LLM(**llm_kwargs)
-    sampling_params = SamplingParams(
+    lora_request = None
+    if adapter_path is not None:
+        lora_request = LoRARequest("adapter", 1, str(adapter_path))
+    return llm, SamplingParams, lora_request
+
+
+def vllm_generate_texts(llm, sampling_params_cls, lora_request, prompts, args, max_tokens=None, n=1, desc="vLLM generate"):
+    max_tokens = args.max_completion_tokens if max_tokens is None else max_tokens
+    sampling_params = sampling_params_cls(
         n=n,
         temperature=args.temperature,
         max_tokens=max_tokens,
     )
-    lora_request = None
-    if adapter_path is not None:
-        lora_request = LoRARequest("adapter", 1, str(adapter_path))
-
-    outputs = llm.generate(prompts, sampling_params, lora_request=lora_request)
-    generated = [[choice.text for choice in output.outputs] for output in outputs]
-    del llm
-    clear_cuda()
+    generated = []
+    batch_size = max(1, args.vllm_batch_size)
+    for start in tqdm(range(0, len(prompts), batch_size), desc=desc):
+        batch_prompts = prompts[start:start + batch_size]
+        outputs = llm.generate(batch_prompts, sampling_params, lora_request=lora_request)
+        generated.extend([[choice.text for choice in output.outputs] for output in outputs])
     return generated
 
 
-def build_vllm_prefixes(model_name, tokenizer, prompts, block_idx, args, adapter_path):
+def build_vllm_prefixes(llm, sampling_params_cls, lora_request, prompts, block_idx, args):
     if block_idx == 1:
         return prompts
 
     prefix_new_tokens = (block_idx - 1) * args.block_size
     prefix_outputs = vllm_generate_texts(
-        model_name,
+        llm,
+        sampling_params_cls,
+        lora_request,
         prompts,
         args,
-        adapter_path=adapter_path,
         max_tokens=prefix_new_tokens,
         n=1,
+        desc=f"block {block_idx} prefix generation",
     )
     return [prompt + choices[0] for prompt, choices in zip(prompts, prefix_outputs)]
 
 
 def generate_stage_buffer(model_name, tokenizer, dataset, block_idx, args, adapter_path, output_dir):
     prompts = [format_prompt(row["prompt"], args.model, tokenizer, cot=True) for row in dataset]
-    prefixes = build_vllm_prefixes(model_name, tokenizer, prompts, block_idx, args, adapter_path)
-    completion_outputs = vllm_generate_texts(
-        model_name,
-        prefixes,
-        args,
-        adapter_path=adapter_path,
-        max_tokens=args.max_completion_tokens,
-        n=args.completions_per_prefix,
-    )
+    llm, sampling_params_cls, lora_request = load_vllm(model_name, args, adapter_path)
+    try:
+        prefixes = build_vllm_prefixes(llm, sampling_params_cls, lora_request, prompts, block_idx, args)
+        completion_outputs = vllm_generate_texts(
+            llm,
+            sampling_params_cls,
+            lora_request,
+            prefixes,
+            args,
+            max_tokens=args.max_completion_tokens,
+            n=args.completions_per_prefix,
+            desc=f"block {block_idx} completion generation",
+        )
+    finally:
+        del llm
+        clear_cuda()
 
     records = []
     for example_idx, (row, prefix_text, completions) in enumerate(zip(dataset, prefixes, completion_outputs)):
@@ -339,6 +353,7 @@ def main():
     parser.add_argument("--vllm_tensor_parallel_size", type=int, default=1)
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.9)
     parser.add_argument("--vllm_max_model_len", type=int, default=4096)
+    parser.add_argument("--vllm_batch_size", type=int, default=8)
     args = parser.parse_args()
 
     distributed, rank, local_rank, world_size, distributed_device = init_distributed(args.ddp_timeout_minutes)
