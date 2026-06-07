@@ -153,13 +153,8 @@ def evaluate_model_with_vllm(model_name, tokenizer, eval_rows, args, adapter_pat
         else:
             sampling_kwargs["temperature"] = 0.0
         sampling_params = sampling_params_cls(**sampling_kwargs)
-
-        completions = []
-        batch_size = max(1, args.vllm_batch_size)
-        for start in tqdm(range(0, len(prompts), batch_size), desc="eval", leave=False):
-            batch_prompts = prompts[start:start + batch_size]
-            outputs = llm.generate(batch_prompts, sampling_params, lora_request=lora_request)
-            completions.extend([output.outputs[0].text for output in outputs])
+        outputs = llm.generate(prompts, sampling_params, lora_request=lora_request)
+        completions = [output.outputs[0].text for output in outputs]
     finally:
         del llm
         clear_cuda()
