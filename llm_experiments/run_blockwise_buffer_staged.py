@@ -1,5 +1,6 @@
 import argparse
 import os
+import socket
 import subprocess
 import sys
 from datetime import datetime
@@ -73,6 +74,13 @@ def run(command, env):
     subprocess.run(command, cwd=Path(__file__).resolve().parent, env=env, check=True)
 
 
+def find_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return sock.getsockname()[1]
+
+
 def log_to_file(output_dir, message):
     debug_dir = Path(output_dir) / "debug_logs"
     debug_dir.mkdir(parents=True, exist_ok=True)
@@ -86,7 +94,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run sync-buffer TB training as separate vLLM sampling and DDP training stages.")
     parser.add_argument("--num_gpus", type=int, default=None)
     parser.add_argument("--gpus", type=str, default=None)
-    parser.add_argument("--master_port", type=int, default=29505)
+    parser.add_argument("--master_port", type=int, default=None)
     parser.add_argument("training_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -189,6 +197,8 @@ def main():
         else:
             block_args = remove_option(block_args, "--resume_from_checkpoint")
 
+        master_port = args.master_port or find_free_port()
+
         train_cmd = [
             sys.executable,
             "-m",
@@ -196,12 +206,15 @@ def main():
             "--nproc_per_node",
             str(num_gpus),
             "--master_port",
-            str(args.master_port),
+            str(master_port),
             "blockwise_power_tb_buffer_train.py",
             *block_args,
         ]
         print("DDP CUDA_VISIBLE_DEVICES:", ddp_env.get("CUDA_VISIBLE_DEVICES"), flush=True)
-        log_to_file(known.output_dir, f"stage {block_idx} launching DDP CUDA_VISIBLE_DEVICES={ddp_env.get('CUDA_VISIBLE_DEVICES')}")
+        log_to_file(
+            known.output_dir,
+            f"stage {block_idx} launching DDP CUDA_VISIBLE_DEVICES={ddp_env.get('CUDA_VISIBLE_DEVICES')} master_port={master_port}",
+        )
         run(train_cmd, ddp_env)
         log_to_file(known.output_dir, f"stage {block_idx} DDP training complete")
         print(f"[stage {block_idx}] training complete", flush=True)
