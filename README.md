@@ -175,6 +175,42 @@ python run_blockwise_multi_gpu.py --gpus 0,1,2,3 -- \
 
 If the checkpoint has a wandb run id, the resumed run continues logging to the same wandb run. Checkpoints are uploaded as wandb artifacts only when ```--wandb_log_checkpoints``` is set.
 
+Synchronous buffer training decouples stage sampling from training. Rank 0 first samples a stage
+buffer with vLLM, then all DDP ranks train from the saved completions:
+
+```bash
+python run_blockwise_buffer_multi_gpu.py --gpus 0,1 -- \
+  --data_path ../data/train.parquet \
+  --eval_data_path data/MATH500.json \
+  --model qwen \
+  --max_examples 32 \
+  --batch_size 4 \
+  --micro_batch_size 1 \
+  --gradient_checkpointing \
+  --epochs 1 \
+  --num_blocks 3 \
+  --block_size 192 \
+  --completions_per_prefix 4 \
+  --max_completion_tokens 3072 \
+  --temperature 0.25 \
+  --alpha 4.0 \
+  --beta 1.0 \
+  --lr 1e-5 \
+  --seed 0 \
+  --save_samples \
+  --save_every_block \
+  --eval_every_block \
+  --eval_examples 100 \
+  --eval_max_new_tokens 3072 \
+  --ddp_timeout_minutes 120 \
+  --use_wandb \
+  --wandb_run_name buffer-small-qwen-seed0 \
+  --output_dir results/blockwise_buffer_small_qwen_seed0
+```
+
+By default, the trainer scores multiple completions for each prompt in parallel. If this exceeds
+memory, add ```--score_micro_batch_size 1``` to score completions one at a time.
+
 ## Evaluation
 **Single-shot Reasoning**
 
