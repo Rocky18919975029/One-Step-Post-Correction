@@ -28,6 +28,7 @@ def parse_training_args(args_list):
     parser.add_argument("--vllm_visible_devices", default=None)
     parser.add_argument("--vllm_enforce_eager", action="store_true")
     parser.add_argument("--vllm_disable_custom_all_reduce", action="store_true")
+    parser.add_argument("--reuse_existing_buffers", action="store_true")
     known, _ = parser.parse_known_args(args_list)
     return known
 
@@ -139,54 +140,59 @@ def main():
     log_to_file(known.output_dir, f"launcher start start_block={start_block} num_blocks={known.num_blocks} checkpoint={checkpoint}")
 
     for block_idx in range(start_block, known.num_blocks + 1):
-        log_to_file(known.output_dir, f"stage {block_idx} preparing sampler adapter_path={Path(checkpoint) / 'adapter' if checkpoint else None}")
-        print(f"[stage {block_idx}] preparing sampler", flush=True)
         adapter_path = Path(checkpoint) / "adapter" if checkpoint else None
-        sampler_cmd = [
-            sys.executable,
-            "blockwise_vllm_sample_buffer.py",
-            "--data_path",
-            known.data_path,
-            "--output_dir",
-            known.output_dir,
-            "--model",
-            known.model,
-            "--block_idx",
-            str(block_idx),
-            "--max_examples",
-            str(known.max_examples),
-            "--block_size",
-            str(known.block_size),
-            "--completions_per_prefix",
-            str(known.completions_per_prefix),
-            "--max_completion_tokens",
-            str(known.max_completion_tokens),
-            "--temperature",
-            str(known.temperature),
-            "--seed",
-            str(known.seed),
-            "--vllm_dtype",
-            known.vllm_dtype,
-            "--vllm_tensor_parallel_size",
-            str(known.vllm_tensor_parallel_size),
-            "--vllm_gpu_memory_utilization",
-            str(known.vllm_gpu_memory_utilization),
-            "--vllm_max_model_len",
-            str(known.vllm_max_model_len),
-            "--vllm_batch_size",
-            str(known.vllm_batch_size),
-        ]
-        if adapter_path is not None:
-            sampler_cmd.extend(["--adapter_path", str(adapter_path)])
-        if known.vllm_enforce_eager:
-            sampler_cmd.append("--vllm_enforce_eager")
-        if known.vllm_disable_custom_all_reduce:
-            sampler_cmd.append("--vllm_disable_custom_all_reduce")
-        print("vLLM CUDA_VISIBLE_DEVICES:", vllm_env.get("CUDA_VISIBLE_DEVICES"), flush=True)
-        log_to_file(known.output_dir, f"stage {block_idx} sampler env CUDA_VISIBLE_DEVICES={vllm_env.get('CUDA_VISIBLE_DEVICES')}")
-        run(sampler_cmd, vllm_env)
-        log_to_file(known.output_dir, f"stage {block_idx} sampler complete")
-        print(f"[stage {block_idx}] sampler complete; launching DDP training", flush=True)
+        buffer_path = Path(known.output_dir) / "buffers" / f"block_{block_idx}.csv"
+        if known.reuse_existing_buffers and buffer_path.exists():
+            log_to_file(known.output_dir, f"stage {block_idx} reusing existing buffer {buffer_path}")
+            print(f"[stage {block_idx}] reusing existing buffer", flush=True)
+        else:
+            log_to_file(known.output_dir, f"stage {block_idx} preparing sampler adapter_path={adapter_path}")
+            print(f"[stage {block_idx}] preparing sampler", flush=True)
+            sampler_cmd = [
+                sys.executable,
+                "blockwise_vllm_sample_buffer.py",
+                "--data_path",
+                known.data_path,
+                "--output_dir",
+                known.output_dir,
+                "--model",
+                known.model,
+                "--block_idx",
+                str(block_idx),
+                "--max_examples",
+                str(known.max_examples),
+                "--block_size",
+                str(known.block_size),
+                "--completions_per_prefix",
+                str(known.completions_per_prefix),
+                "--max_completion_tokens",
+                str(known.max_completion_tokens),
+                "--temperature",
+                str(known.temperature),
+                "--seed",
+                str(known.seed),
+                "--vllm_dtype",
+                known.vllm_dtype,
+                "--vllm_tensor_parallel_size",
+                str(known.vllm_tensor_parallel_size),
+                "--vllm_gpu_memory_utilization",
+                str(known.vllm_gpu_memory_utilization),
+                "--vllm_max_model_len",
+                str(known.vllm_max_model_len),
+                "--vllm_batch_size",
+                str(known.vllm_batch_size),
+            ]
+            if adapter_path is not None:
+                sampler_cmd.extend(["--adapter_path", str(adapter_path)])
+            if known.vllm_enforce_eager:
+                sampler_cmd.append("--vllm_enforce_eager")
+            if known.vllm_disable_custom_all_reduce:
+                sampler_cmd.append("--vllm_disable_custom_all_reduce")
+            print("vLLM CUDA_VISIBLE_DEVICES:", vllm_env.get("CUDA_VISIBLE_DEVICES"), flush=True)
+            log_to_file(known.output_dir, f"stage {block_idx} sampler env CUDA_VISIBLE_DEVICES={vllm_env.get('CUDA_VISIBLE_DEVICES')}")
+            run(sampler_cmd, vllm_env)
+            log_to_file(known.output_dir, f"stage {block_idx} sampler complete")
+            print(f"[stage {block_idx}] sampler complete; launching DDP training", flush=True)
 
         block_args = list(training_args)
         block_args = set_option(block_args, "--num_blocks", block_idx)
