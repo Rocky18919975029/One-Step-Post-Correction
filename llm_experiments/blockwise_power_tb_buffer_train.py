@@ -169,10 +169,10 @@ def vllm_subprocess_env(args):
         "MASTER_ADDR",
         "MASTER_PORT",
         "TORCHELASTIC_RUN_ID",
-        "TORCHELASTIC_RESTART_COUNT",
         "TORCHELASTIC_MAX_RESTARTS",
     ]:
         env.pop(key, None)
+    env["TORCHELASTIC_RESTART_COUNT"] = "0"
 
     if args.vllm_visible_devices:
         env["CUDA_VISIBLE_DEVICES"] = args.vllm_visible_devices
