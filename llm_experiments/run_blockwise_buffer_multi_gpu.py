@@ -30,7 +30,7 @@ def main():
     env["CUDA_VISIBLE_DEVICES"] = ",".join(gpus)
     env["PYTHONUNBUFFERED"] = "1"
     env.setdefault("TORCH_NCCL_BLOCKING_WAIT", "1")
-    env.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
+    env.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
 
     command = [
         sys.executable,

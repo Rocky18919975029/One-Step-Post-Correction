@@ -2,6 +2,8 @@ import argparse
 import gc
 import os
 import random
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -152,6 +154,75 @@ def generate_stage_buffer(model_name, tokenizer, dataset, block_idx, args, adapt
     pd.DataFrame(records).to_csv(buffer_path, index=False)
     print(f"Saved buffer {buffer_path}: {len(records)} samples", flush=True)
     return buffer_path
+
+
+def vllm_subprocess_env(args):
+    env = os.environ.copy()
+    for key in [
+        "RANK",
+        "LOCAL_RANK",
+        "WORLD_SIZE",
+        "GROUP_RANK",
+        "ROLE_RANK",
+        "ROLE_WORLD_SIZE",
+        "LOCAL_WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "TORCHELASTIC_RUN_ID",
+        "TORCHELASTIC_RESTART_COUNT",
+        "TORCHELASTIC_MAX_RESTARTS",
+    ]:
+        env.pop(key, None)
+
+    if args.vllm_visible_devices:
+        env["CUDA_VISIBLE_DEVICES"] = args.vllm_visible_devices
+    elif args.vllm_tensor_parallel_size == 1 and env.get("CUDA_VISIBLE_DEVICES"):
+        env["CUDA_VISIBLE_DEVICES"] = env["CUDA_VISIBLE_DEVICES"].split(",")[0]
+    return env
+
+
+def generate_stage_buffer_subprocess(block_idx, args, adapter_path):
+    command = [
+        sys.executable,
+        "blockwise_vllm_sample_buffer.py",
+        "--data_path",
+        args.data_path,
+        "--output_dir",
+        args.output_dir,
+        "--model",
+        args.model,
+        "--block_idx",
+        str(block_idx),
+        "--max_examples",
+        str(args.max_examples),
+        "--block_size",
+        str(args.block_size),
+        "--completions_per_prefix",
+        str(args.completions_per_prefix),
+        "--max_completion_tokens",
+        str(args.max_completion_tokens),
+        "--temperature",
+        str(args.temperature),
+        "--seed",
+        str(args.seed),
+        "--vllm_dtype",
+        args.vllm_dtype,
+        "--vllm_tensor_parallel_size",
+        str(args.vllm_tensor_parallel_size),
+        "--vllm_gpu_memory_utilization",
+        str(args.vllm_gpu_memory_utilization),
+        "--vllm_max_model_len",
+        str(args.vllm_max_model_len),
+        "--vllm_batch_size",
+        str(args.vllm_batch_size),
+    ]
+    if adapter_path is not None:
+        command.extend(["--adapter_path", str(adapter_path)])
+
+    env = vllm_subprocess_env(args)
+    print("Launching vLLM sampler:", " ".join(command), flush=True)
+    print("vLLM CUDA_VISIBLE_DEVICES:", env.get("CUDA_VISIBLE_DEVICES"), flush=True)
+    subprocess.run(command, cwd=Path(__file__).resolve().parent, env=env, check=True)
 
 
 def encode_buffer_group(tokenizer, rows, device):
@@ -354,6 +425,7 @@ def main():
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.9)
     parser.add_argument("--vllm_max_model_len", type=int, default=4096)
     parser.add_argument("--vllm_batch_size", type=int, default=8)
+    parser.add_argument("--vllm_visible_devices", type=str, default=None)
     args = parser.parse_args()
 
     distributed, rank, local_rank, world_size, distributed_device = init_distributed(args.ddp_timeout_minutes)
@@ -394,7 +466,7 @@ def main():
     for block_idx in range(start_block_idx, args.num_blocks + 1):
         stage_adapter_path = adapter_path
         if rank == 0:
-            generate_stage_buffer(model_name, tokenizer, dataset, block_idx, args, stage_adapter_path, output_dir)
+            generate_stage_buffer_subprocess(block_idx, args, stage_adapter_path)
         if distributed:
             dist.barrier()
 
