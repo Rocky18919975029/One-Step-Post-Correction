@@ -65,6 +65,8 @@ def load_vllm(model_name, args, adapter_path=None):
         "gpu_memory_utilization": args.vllm_gpu_memory_utilization,
         "enable_lora": adapter_path is not None,
         "max_model_len": args.vllm_max_model_len,
+        "enforce_eager": args.vllm_enforce_eager,
+        "disable_custom_all_reduce": args.vllm_disable_custom_all_reduce,
     }
     llm = LLM(**llm_kwargs)
     lora_request = None
@@ -216,6 +218,10 @@ def generate_stage_buffer_subprocess(block_idx, args, adapter_path):
         "--vllm_batch_size",
         str(args.vllm_batch_size),
     ]
+    if args.vllm_enforce_eager:
+        command.append("--vllm_enforce_eager")
+    if args.vllm_disable_custom_all_reduce:
+        command.append("--vllm_disable_custom_all_reduce")
     if adapter_path is not None:
         command.extend(["--adapter_path", str(adapter_path)])
 
@@ -426,6 +432,8 @@ def main():
     parser.add_argument("--vllm_max_model_len", type=int, default=4096)
     parser.add_argument("--vllm_batch_size", type=int, default=8)
     parser.add_argument("--vllm_visible_devices", type=str, default=None)
+    parser.add_argument("--vllm_enforce_eager", action="store_true")
+    parser.add_argument("--vllm_disable_custom_all_reduce", action="store_true")
     args = parser.parse_args()
 
     distributed, rank, local_rank, world_size, distributed_device = init_distributed(args.ddp_timeout_minutes)

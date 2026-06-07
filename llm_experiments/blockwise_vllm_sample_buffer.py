@@ -25,6 +25,8 @@ def main():
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.9)
     parser.add_argument("--vllm_max_model_len", type=int, default=4096)
     parser.add_argument("--vllm_batch_size", type=int, default=8)
+    parser.add_argument("--vllm_enforce_eager", action="store_true")
+    parser.add_argument("--vllm_disable_custom_all_reduce", action="store_true")
     args = parser.parse_args()
 
     seed_everything(args.seed)
