@@ -1,9 +1,12 @@
 import argparse
+import faulthandler
 import gc
 import os
 import random
 import subprocess
 import sys
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +40,9 @@ from blockwise_power_tb_train import (
 from power_samp_utils import format_prompt
 
 
+DEBUG_HANDLE = None
+
+
 def resolve_data_path(path):
     path = Path(path)
     if path.exists():
@@ -51,11 +57,43 @@ def clear_cuda():
         torch.cuda.ipc_collect()
 
 
+def setup_debug_file(output_dir, name, dump_timeout_seconds=0):
+    global DEBUG_HANDLE
+    debug_dir = Path(output_dir) / "debug_logs"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    debug_path = debug_dir / name
+    DEBUG_HANDLE = debug_path.open("a", buffering=1)
+    faulthandler.enable(DEBUG_HANDLE)
+    if dump_timeout_seconds and dump_timeout_seconds > 0:
+        faulthandler.dump_traceback_later(dump_timeout_seconds, repeat=True, file=DEBUG_HANDLE)
+    return debug_path
+
+
+def close_debug_file():
+    global DEBUG_HANDLE
+    faulthandler.cancel_dump_traceback_later()
+    if DEBUG_HANDLE is not None:
+        DEBUG_HANDLE.close()
+        DEBUG_HANDLE = None
+
+
+def debug_log(message, rank=None):
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    prefix = f"[debug {timestamp} pid={os.getpid()}"
+    if rank is not None:
+        prefix += f" rank={rank}"
+    prefix += "]"
+    line = f"{prefix} {message}"
+    print(line, flush=True)
+    if DEBUG_HANDLE is not None:
+        print(line, file=DEBUG_HANDLE, flush=True)
+
+
 def sync_point(distributed, local_rank, rank, label):
-    print(f"[rank{rank}] {label} (pre-barrier)", flush=True)
+    debug_log(f"{label} (pre-barrier)", rank=rank)
     if distributed:
         dist.barrier(device_ids=[local_rank])
-    print(f"[rank{rank}] {label} (post-barrier)", flush=True)
+    debug_log(f"{label} (post-barrier)", rank=rank)
 
 
 def load_vllm(model_name, args, adapter_path=None):
@@ -443,175 +481,193 @@ def main():
     parser.add_argument("--vllm_enforce_eager", action="store_true")
     parser.add_argument("--vllm_disable_custom_all_reduce", action="store_true")
     parser.add_argument("--skip_buffer_sampling", action="store_true")
+    parser.add_argument("--debug_dump_timeout_seconds", type=int, default=600)
     args = parser.parse_args()
 
-    distributed, rank, local_rank, world_size, distributed_device = init_distributed(args.ddp_timeout_minutes)
-    print(f"[rank{rank}] distributed init complete", flush=True)
-    seed_everything(args.seed + rank)
-
     output_dir = Path(args.output_dir)
-    if rank == 0:
-        output_dir.mkdir(parents=True, exist_ok=True)
-    if distributed:
-        print(f"[rank{rank}] output dir ready (pre-barrier)", flush=True)
-        dist.barrier(device_ids=[local_rank])
-        print(f"[rank{rank}] output dir ready (post-barrier)", flush=True)
+    debug_path = setup_debug_file(output_dir, f"trainer_preinit_pid{os.getpid()}.log", args.debug_dump_timeout_seconds)
+    debug_log(f"trainer process start argv={' '.join(sys.argv)}")
+    debug_log(f"pre-init env CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} LOCAL_RANK={os.environ.get('LOCAL_RANK')} RANK={os.environ.get('RANK')} WORLD_SIZE={os.environ.get('WORLD_SIZE')}")
 
-    print(f"[rank{rank}] loading datasets", flush=True)
-    dataset = load_math_dataset(args.data_path)[: args.max_examples]
-    eval_rows = load_math_dataset(args.eval_data_path)[: args.eval_examples] if args.eval_every_block else []
-    print(f"[rank{rank}] loaded datasets train={len(dataset)} eval={len(eval_rows)}", flush=True)
-    model_name = MODEL_NAME_BY_KEY[args.model]
-    print(f"[rank{rank}] loading tokenizer for {model_name}", flush=True)
-    tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    print(f"[rank{rank}] tokenizer ready", flush=True)
-
-    resume_state = None
-    start_block_idx = 1
-    global_step = 0
-    adapter_path = None
-    if args.resume_from_checkpoint:
-        print(f"[rank{rank}] reading resume state from {args.resume_from_checkpoint}", flush=True)
-        checkpoint_dir = Path(args.resume_from_checkpoint)
-        adapter_path = checkpoint_dir / "adapter"
-        resume_state = torch.load(checkpoint_dir / "training_state.pt", map_location="cpu", weights_only=False)["state"]
-        start_block_idx = int(resume_state.get("next_block_idx", 1))
-        global_step = int(resume_state.get("global_step", 0))
-        print(
-            f"[rank{rank}] resume state ready next_block_idx={start_block_idx} global_step={global_step}",
-            flush=True,
+    try:
+        distributed, rank, local_rank, world_size, distributed_device = init_distributed(args.ddp_timeout_minutes)
+        close_debug_file()
+        debug_path = setup_debug_file(output_dir, f"trainer_rank{rank}.log", args.debug_dump_timeout_seconds)
+        debug_log("distributed init complete", rank=rank)
+        debug_log(
+            f"post-init env CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} LOCAL_RANK={local_rank} RANK={rank} WORLD_SIZE={world_size}",
+            rank=rank,
         )
-
-    print(f"[rank{rank}] initializing wandb state", flush=True)
-    wandb_run = maybe_init_wandb(args, rank, resume_state)
-    if rank == 0 and wandb_run is not None and args.wandb_id is None:
-        args.wandb_id = wandb_run.id
-    print(f"[rank{rank}] startup complete; entering block loop", flush=True)
-
-    metrics = []
-    sample_records = []
-    eval_records = []
-
-    for block_idx in range(start_block_idx, args.num_blocks + 1):
-        stage_adapter_path = adapter_path
-        if rank == 0 and not args.skip_buffer_sampling:
-            generate_stage_buffer_subprocess(block_idx, args, stage_adapter_path)
-        sync_point(distributed, local_rank, rank, f"[block {block_idx}] sampler finished; entering training setup")
-
-        buffer_path = output_dir / "buffers" / f"block_{block_idx}.csv"
-        if not buffer_path.exists():
-            raise FileNotFoundError(f"Missing sampled buffer for block {block_idx}: {buffer_path}")
-        print(f"[rank{rank}] [block {block_idx}] loading buffer from {buffer_path}", flush=True)
-        buffer_df = pd.read_csv(buffer_path)
-        print(f"[rank{rank}] [block {block_idx}] loaded {len(buffer_df)} buffered samples", flush=True)
-
-        print(f"[rank{rank}] [block {block_idx}] loading train model", flush=True)
-        model = load_lora_model(model_name, args.torch_dtype, distributed_device, stage_adapter_path)
-        if args.gradient_checkpointing:
-            enable_gradient_checkpointing(model)
-        model.train()
-        if distributed:
-            model = DDP(
-                model,
-                device_ids=[local_rank],
-                output_device=local_rank,
-                find_unused_parameters=False,
-            )
-        optimizer = torch.optim.AdamW(
-            [param for param in model.parameters() if param.requires_grad],
-            lr=args.lr,
-        )
-        if args.resume_from_checkpoint and block_idx == start_block_idx:
-            print(
-                f"[rank{rank}] [block {block_idx}] restoring optimizer and RNG from {args.resume_from_checkpoint}",
-                flush=True,
-            )
-            load_checkpoint_state(args.resume_from_checkpoint, optimizer, distributed_device)
-
-        print(f"[rank{rank}] [block {block_idx}] starting training loop", flush=True)
-        global_step = train_stage_from_buffer(
-            model,
-            tokenizer,
-            optimizer,
-            buffer_df,
-            dataset,
-            block_idx,
-            args,
-            rank,
-            world_size,
-            global_step,
-            metrics,
-            sample_records,
-            wandb_run,
-        )
-
-        if args.save_every_block:
-            block_dir = output_dir / f"block_{block_idx}"
-            if rank == 0:
-                unwrap_model(model).save_pretrained(block_dir)
-                tokenizer.save_pretrained(block_dir)
-            sync_point(distributed, local_rank, rank, f"[block {block_idx}] saved block checkpoint")
-
-        if args.eval_every_block and rank == 0:
-            rank_print(rank, f"[block {block_idx}] starting eval on {len(eval_rows)} examples", flush=True)
-            eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
-            eval_metrics = {**eval_metrics, "block_idx": block_idx, "step": global_step}
-            eval_records.append(eval_metrics)
-            print(eval_metrics, flush=True)
-            if wandb_run is not None:
-                wandb_run.log(eval_metrics, step=global_step)
+        seed_everything(args.seed + rank)
 
         if rank == 0:
-            checkpoint_state = {
-                "next_block_idx": block_idx + 1,
-                "global_step": global_step,
-                "wandb_id": wandb_run.id if wandb_run is not None else args.wandb_id,
-                "args": vars(args),
-            }
-            save_checkpoint(output_dir, model, tokenizer, optimizer, checkpoint_state, distributed=False)
-            adapter_path = output_dir / "checkpoint_latest" / "adapter"
-        sync_point(distributed, local_rank, rank, f"[block {block_idx}] checkpoint_latest updated")
+            output_dir.mkdir(parents=True, exist_ok=True)
         if distributed:
-            adapter_path = output_dir / "checkpoint_latest" / "adapter"
+            debug_log("output dir ready (pre-barrier)", rank=rank)
+            dist.barrier(device_ids=[local_rank])
+            debug_log("output dir ready (post-barrier)", rank=rank)
 
-        del model
-        del optimizer
-        clear_cuda()
+        debug_log("loading datasets", rank=rank)
+        dataset = load_math_dataset(args.data_path)[: args.max_examples]
+        eval_rows = load_math_dataset(args.eval_data_path)[: args.eval_examples] if args.eval_every_block else []
+        debug_log(f"loaded datasets train={len(dataset)} eval={len(eval_rows)}", rank=rank)
+        model_name = MODEL_NAME_BY_KEY[args.model]
+        debug_log(f"loading tokenizer for {model_name}", rank=rank)
+        tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        debug_log("tokenizer ready", rank=rank)
 
-    pd.DataFrame(metrics).to_csv(output_dir / f"metrics_rank{rank}.csv", index=False)
-    if args.save_samples:
-        pd.DataFrame(sample_records).to_csv(output_dir / f"samples_rank{rank}.csv", index=False)
-    if rank == 0 and eval_records:
-        pd.DataFrame(eval_records).to_csv(output_dir / "eval_metrics.csv", index=False)
+        resume_state = None
+        start_block_idx = 1
+        global_step = 0
+        adapter_path = None
+        if args.resume_from_checkpoint:
+            debug_log(f"reading resume state from {args.resume_from_checkpoint}", rank=rank)
+            checkpoint_dir = Path(args.resume_from_checkpoint)
+            adapter_path = checkpoint_dir / "adapter"
+            resume_state = torch.load(checkpoint_dir / "training_state.pt", map_location="cpu", weights_only=False)["state"]
+            start_block_idx = int(resume_state.get("next_block_idx", 1))
+            global_step = int(resume_state.get("global_step", 0))
+            debug_log(
+                f"resume state ready next_block_idx={start_block_idx} global_step={global_step}",
+                rank=rank,
+            )
 
-    sync_point(distributed, local_rank, rank, "[final] rank outputs written")
+        debug_log("initializing wandb state", rank=rank)
+        wandb_run = maybe_init_wandb(args, rank, resume_state)
+        if rank == 0 and wandb_run is not None and args.wandb_id is None:
+            args.wandb_id = wandb_run.id
+        debug_log("startup complete; entering block loop", rank=rank)
 
-    if rank == 0:
-        metric_frames = [
-            frame
-            for path in sorted(output_dir.glob("metrics_rank*.csv"))
-            for frame in [read_csv_if_nonempty(path)]
-            if frame is not None
-        ]
-        if metric_frames:
-            pd.concat(metric_frames, ignore_index=True).to_csv(output_dir / "metrics.csv", index=False)
+        metrics = []
+        sample_records = []
+        eval_records = []
 
+        for block_idx in range(start_block_idx, args.num_blocks + 1):
+            stage_adapter_path = adapter_path
+            if rank == 0 and not args.skip_buffer_sampling:
+                generate_stage_buffer_subprocess(block_idx, args, stage_adapter_path)
+            sync_point(distributed, local_rank, rank, f"[block {block_idx}] sampler finished; entering training setup")
+
+            buffer_path = output_dir / "buffers" / f"block_{block_idx}.csv"
+            if not buffer_path.exists():
+                raise FileNotFoundError(f"Missing sampled buffer for block {block_idx}: {buffer_path}")
+            debug_log(f"[block {block_idx}] loading buffer from {buffer_path}", rank=rank)
+            buffer_df = pd.read_csv(buffer_path)
+            debug_log(f"[block {block_idx}] loaded {len(buffer_df)} buffered samples", rank=rank)
+
+            debug_log(f"[block {block_idx}] loading train model", rank=rank)
+            model = load_lora_model(model_name, args.torch_dtype, distributed_device, stage_adapter_path)
+            if args.gradient_checkpointing:
+                enable_gradient_checkpointing(model)
+            model.train()
+            if distributed:
+                model = DDP(
+                    model,
+                    device_ids=[local_rank],
+                    output_device=local_rank,
+                    find_unused_parameters=False,
+                )
+            optimizer = torch.optim.AdamW(
+                [param for param in model.parameters() if param.requires_grad],
+                lr=args.lr,
+            )
+            if args.resume_from_checkpoint and block_idx == start_block_idx:
+                debug_log(
+                    f"[block {block_idx}] restoring optimizer and RNG from {args.resume_from_checkpoint}",
+                    rank=rank,
+                )
+                load_checkpoint_state(args.resume_from_checkpoint, optimizer, distributed_device)
+
+            debug_log(f"[block {block_idx}] starting training loop", rank=rank)
+            global_step = train_stage_from_buffer(
+                model,
+                tokenizer,
+                optimizer,
+                buffer_df,
+                dataset,
+                block_idx,
+                args,
+                rank,
+                world_size,
+                global_step,
+                metrics,
+                sample_records,
+                wandb_run,
+            )
+
+            if args.save_every_block:
+                block_dir = output_dir / f"block_{block_idx}"
+                if rank == 0:
+                    unwrap_model(model).save_pretrained(block_dir)
+                    tokenizer.save_pretrained(block_dir)
+                sync_point(distributed, local_rank, rank, f"[block {block_idx}] saved block checkpoint")
+
+            if args.eval_every_block and rank == 0:
+                debug_log(f"[block {block_idx}] starting eval on {len(eval_rows)} examples", rank=rank)
+                eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
+                eval_metrics = {**eval_metrics, "block_idx": block_idx, "step": global_step}
+                eval_records.append(eval_metrics)
+                print(eval_metrics, flush=True)
+                if wandb_run is not None:
+                    wandb_run.log(eval_metrics, step=global_step)
+
+            if rank == 0:
+                checkpoint_state = {
+                    "next_block_idx": block_idx + 1,
+                    "global_step": global_step,
+                    "wandb_id": wandb_run.id if wandb_run is not None else args.wandb_id,
+                    "args": vars(args),
+                }
+                save_checkpoint(output_dir, model, tokenizer, optimizer, checkpoint_state, distributed=False)
+                adapter_path = output_dir / "checkpoint_latest" / "adapter"
+            sync_point(distributed, local_rank, rank, f"[block {block_idx}] checkpoint_latest updated")
+            if distributed:
+                adapter_path = output_dir / "checkpoint_latest" / "adapter"
+
+            del model
+            del optimizer
+            clear_cuda()
+
+        pd.DataFrame(metrics).to_csv(output_dir / f"metrics_rank{rank}.csv", index=False)
         if args.save_samples:
-            sample_frames = [
+            pd.DataFrame(sample_records).to_csv(output_dir / f"samples_rank{rank}.csv", index=False)
+        if rank == 0 and eval_records:
+            pd.DataFrame(eval_records).to_csv(output_dir / "eval_metrics.csv", index=False)
+
+        sync_point(distributed, local_rank, rank, "[final] rank outputs written")
+
+        if rank == 0:
+            metric_frames = [
                 frame
-                for path in sorted(output_dir.glob("samples_rank*.csv"))
+                for path in sorted(output_dir.glob("metrics_rank*.csv"))
                 for frame in [read_csv_if_nonempty(path)]
                 if frame is not None
             ]
-            if sample_frames:
-                pd.concat(sample_frames, ignore_index=True).to_csv(output_dir / "samples.csv", index=False)
+            if metric_frames:
+                pd.concat(metric_frames, ignore_index=True).to_csv(output_dir / "metrics.csv", index=False)
 
-        if wandb_run is not None:
-            wandb_run.finish()
+            if args.save_samples:
+                sample_frames = [
+                    frame
+                    for path in sorted(output_dir.glob("samples_rank*.csv"))
+                    for frame in [read_csv_if_nonempty(path)]
+                    if frame is not None
+                ]
+                if sample_frames:
+                    pd.concat(sample_frames, ignore_index=True).to_csv(output_dir / "samples.csv", index=False)
 
-    cleanup_distributed(distributed)
+            if wandb_run is not None:
+                wandb_run.finish()
+
+        cleanup_distributed(distributed)
+    except Exception:
+        debug_log("unhandled exception follows")
+        debug_log(traceback.format_exc().rstrip())
+        raise
+    finally:
+        close_debug_file()
 
 
 if __name__ == "__main__":

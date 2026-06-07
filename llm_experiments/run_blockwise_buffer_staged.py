@@ -2,6 +2,7 @@ import argparse
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -72,6 +73,15 @@ def run(command, env):
     subprocess.run(command, cwd=Path(__file__).resolve().parent, env=env, check=True)
 
 
+def log_to_file(output_dir, message):
+    debug_dir = Path(output_dir) / "debug_logs"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    line = f"[debug {datetime.now().isoformat(timespec='seconds')} pid={os.getpid()}] {message}"
+    print(line, flush=True)
+    with (debug_dir / "staged_launcher.log").open("a", buffering=1) as handle:
+        print(line, file=handle, flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run sync-buffer TB training as separate vLLM sampling and DDP training stages.")
     parser.add_argument("--num_gpus", type=int, default=None)
@@ -118,8 +128,10 @@ def main():
 
         state = torch.load(Path(checkpoint) / "training_state.pt", map_location="cpu", weights_only=False)["state"]
         start_block = int(state.get("next_block_idx", 1))
+    log_to_file(known.output_dir, f"launcher start start_block={start_block} num_blocks={known.num_blocks} checkpoint={checkpoint}")
 
     for block_idx in range(start_block, known.num_blocks + 1):
+        log_to_file(known.output_dir, f"stage {block_idx} preparing sampler adapter_path={Path(checkpoint) / 'adapter' if checkpoint else None}")
         print(f"[stage {block_idx}] preparing sampler", flush=True)
         adapter_path = Path(checkpoint) / "adapter" if checkpoint else None
         sampler_cmd = [
@@ -163,7 +175,9 @@ def main():
         if known.vllm_disable_custom_all_reduce:
             sampler_cmd.append("--vllm_disable_custom_all_reduce")
         print("vLLM CUDA_VISIBLE_DEVICES:", vllm_env.get("CUDA_VISIBLE_DEVICES"), flush=True)
+        log_to_file(known.output_dir, f"stage {block_idx} sampler env CUDA_VISIBLE_DEVICES={vllm_env.get('CUDA_VISIBLE_DEVICES')}")
         run(sampler_cmd, vllm_env)
+        log_to_file(known.output_dir, f"stage {block_idx} sampler complete")
         print(f"[stage {block_idx}] sampler complete; launching DDP training", flush=True)
 
         block_args = list(training_args)
@@ -187,7 +201,9 @@ def main():
             *block_args,
         ]
         print("DDP CUDA_VISIBLE_DEVICES:", ddp_env.get("CUDA_VISIBLE_DEVICES"), flush=True)
+        log_to_file(known.output_dir, f"stage {block_idx} launching DDP CUDA_VISIBLE_DEVICES={ddp_env.get('CUDA_VISIBLE_DEVICES')}")
         run(train_cmd, ddp_env)
+        log_to_file(known.output_dir, f"stage {block_idx} DDP training complete")
         print(f"[stage {block_idx}] training complete", flush=True)
         checkpoint = str(Path(known.output_dir) / "checkpoint_latest")
 
