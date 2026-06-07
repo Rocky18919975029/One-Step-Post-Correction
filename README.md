@@ -152,11 +152,11 @@ Synchronous buffer training now follows a single-GPU, stage-by-stage workflow:
 2. Train from that saved buffer with ```blockwise_power_tb_buffer_train.py```.
 3. Repeat for the next block using ```checkpoint_latest/adapter```.
 
-For a maintained end-to-end smoke test with reduced scale but production-aligned core hyperparameters:
+For a maintained end-to-end pipeline run with one unified scheduler and visible per-step progress bars:
 
 ```bash
 cd llm_experiments
-./run_blockwise_buffer_single_smoke.sh
+python run_blockwise_buffer_pipeline.py --smoke --output_dir results/blockwise_buffer_single_smoke
 ```
 
 Sample block 1:
