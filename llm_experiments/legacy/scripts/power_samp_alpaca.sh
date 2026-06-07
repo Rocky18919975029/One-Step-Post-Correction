@@ -3,11 +3,11 @@
 #SBATCH -t 0-23:59                 # Runtime in D-HH:MM
 #SBATCH --mem=200000               # Memory pool for all cores (MB)
 #SBATCH --gres=gpu:nvidia_h100_80gb_hbm3:1
-#SBATCH --array=0-47               # 6 shards × 8 seeds = 48 tasks
+#SBATCH --array=0-13               # 14 shards × 1 seeds = 14 tasks
 
 # --- map array id -> (batch_idx, seed) ---
-NUM_SHARDS=6
-NUM_SEEDS=8
+NUM_SHARDS=14
+NUM_SEEDS=1
 SEED=$(( SLURM_ARRAY_TASK_ID % NUM_SEEDS ))
 BATCH_IDX=$(( SLURM_ARRAY_TASK_ID / NUM_SEEDS ))
 
@@ -26,7 +26,7 @@ source activate psamp
 cd /path/to/One-Step-Post-Correction/llm_experiments
 
 echo "Running shard BATCH_IDX=${BATCH_IDX} with SEED=${SEED} (task ${SLURM_ARRAY_TASK_ID})"
-python power_samp_gpqa.py \
+python legacy/power_samp_alpaca.py \
   --batch_idx="${BATCH_IDX}" \
   --mcmc_steps=10 \
   --temp=0.25 \

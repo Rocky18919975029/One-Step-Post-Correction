@@ -26,11 +26,11 @@ conda activate psamp
 
 
 ## Sampling
-The llm_experiments folder contains slurm scripts to run power sampling for MATH500 (```power_samp_math.py```), whose .json is included in llm_experiments/data, as well as HumanEval (```power_samp_he.py```), GPQA Diamond (```power_samp_gpqa.py```), and AlpacaEval 2.0 (```power_samp_alpaca.py```), whose corresponding eval sets can be downloaded from their official repos. 
+The maintained path in this repo is the block-wise single-process workflow documented below. Older one-shot sampling, evaluation, pass@k, and Slurm helper scripts have been moved to [`llm_experiments/legacy/`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/legacy) so they do not clutter the main training surface.
 
 To run power sampling on MATH500 with 8 seeds and the eval set split across 5 shards:
 ```bash
-sbatch llm_experiments/scripts/power_samp_math.sh
+sbatch llm_experiments/legacy/scripts/power_samp_math.sh
 ```
 The output is several .csv files (based on the shard and seed number) that store the response outputs, correct answers, original prompts, etc. 
 
@@ -247,24 +247,28 @@ By default, the trainer scores multiple completions for each prompt in parallel.
 memory, add ```--score_micro_batch_size 1``` to score completions one at a time.
 
 ## Evaluation
+The maintained evaluation path for block-wise buffer checkpoints is the `--eval_only --eval_backend vllm` flow shown above.
+
+Older single-shot grading and pass@k utilities are archived under [`llm_experiments/legacy/`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/legacy).
+
 **Single-shot Reasoning**
 
-To grade the responses for single-shot reasoning, collect the .csv files for a given seed run in a folder (e.g. ```results/qwen_math/MATH```) and pass it into ```eval_math.py```:
+To grade the responses for single-shot reasoning, collect the .csv files for a given seed run in a folder (e.g. ```results/qwen_math/MATH```) and pass it into ```legacy/eval_math.py```:
 
 ```bash
 cd llm_experiments
-PYTHONPATH=. python eval_math.py results/qwen_math
+PYTHONPATH=. python legacy/eval_math.py results/qwen_math
 ```
 
-```eval_gpqa.py``` is similar, and for ```eval_he.py```, an additional ```--output_fname``` argument is required, as HumanEval collects all responses in a jsonl file (e.g. ```--output_fname=qwen_math_he```).
+```legacy/eval_gpqa.py``` is similar, and for ```legacy/eval_he.py```, an additional ```--output_fname``` argument is required, as HumanEval collects all responses in a jsonl file (e.g. ```--output_fname=qwen_math_he```).
 
-For AlpacaEval 2.0, ```eval_alpaca.py``` collects a ```--folder``` into one json file ```--output_fname```. For evaluating the json file, follow the instructions in the official repo: https://github.com/tatsu-lab/alpaca_eval
+For AlpacaEval 2.0, ```legacy/eval_alpaca.py``` collects a ```--folder``` into one json file ```--output_fname```. For evaluating the json file, follow the instructions in the official repo: https://github.com/tatsu-lab/alpaca_eval
 
 
 **Pass@k Performance**
 
-For pass@k performance, collect the .csv files across seeds in a folder again (e.g. ```results/qwen_math/MATH```) and pass into ```passk_math.py```:
+For pass@k performance, collect the .csv files across seeds in a folder again (e.g. ```results/qwen_math/MATH```) and pass into ```legacy/passk_math.py```:
 ```bash
-python llm_experiments/passk_math.py --folder=results/qwen_math/MATH
+python llm_experiments/legacy/passk_math.py --folder=results/qwen_math/MATH
 ```
-The output is a plot of the pass@k performance. As with single-shot reasoning, ```eval_gpqa.py``` and ```eval_he.py``` are similar, but for the latter an additional ```--output_fname``` argument is required.
+The output is a plot of the pass@k performance. As with single-shot reasoning, ```legacy/eval_gpqa.py``` and ```legacy/eval_he.py``` are similar, but for the latter an additional ```--output_fname``` argument is required.
