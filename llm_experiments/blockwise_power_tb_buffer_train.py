@@ -137,6 +137,47 @@ def vllm_generate_texts(llm, sampling_params_cls, lora_request, prompts, args, m
     return generated
 
 
+def evaluate_model_with_vllm(model_name, tokenizer, eval_rows, args, adapter_path=None):
+    if not eval_rows:
+        return {}
+
+    prompts = [format_prompt(row["prompt"], args.model, tokenizer, cot=True) for row in eval_rows]
+    llm, sampling_params_cls, lora_request = load_vllm(model_name, args, adapter_path)
+    try:
+        sampling_kwargs = {
+            "n": 1,
+            "max_tokens": args.eval_max_new_tokens,
+        }
+        if args.eval_do_sample:
+            sampling_kwargs["temperature"] = args.eval_temperature
+        else:
+            sampling_kwargs["temperature"] = 0.0
+        sampling_params = sampling_params_cls(**sampling_kwargs)
+
+        completions = []
+        batch_size = max(1, args.vllm_batch_size)
+        for start in tqdm(range(0, len(prompts), batch_size), desc="eval", leave=False):
+            batch_prompts = prompts[start:start + batch_size]
+            outputs = llm.generate(batch_prompts, sampling_params, lora_request=lora_request)
+            completions.extend([output.outputs[0].text for output in outputs])
+    finally:
+        del llm
+        clear_cuda()
+
+    rewards = []
+    boxed = []
+    for row, completion in zip(eval_rows, completions):
+        reward, parsed = score_completion(completion, row["answer"])
+        rewards.append(reward)
+        boxed.append(parsed is not None)
+
+    return {
+        "eval/accuracy": float(np.mean(rewards)),
+        "eval/boxed_rate": float(np.mean(boxed)),
+        "eval/examples": len(eval_rows),
+    }
+
+
 def build_vllm_prefixes(llm, sampling_params_cls, lora_request, prompts, block_idx, args):
     if block_idx == 1:
         return prompts
@@ -468,6 +509,7 @@ def main():
     parser.add_argument("--wandb_resume", type=str, default="allow")
     parser.add_argument("--eval_every_block", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
+    parser.add_argument("--eval_backend", type=str, default="hf", choices=["hf", "vllm"])
     parser.add_argument("--eval_examples", type=int, default=100)
     parser.add_argument("--eval_max_new_tokens", type=int, default=3072)
     parser.add_argument("--eval_temperature", type=float, default=0.25)
@@ -553,8 +595,19 @@ def main():
                 raise ValueError("--eval_only requires --resume_from_checkpoint")
             if rank == 0:
                 debug_log("[eval-only] loading model from checkpoint adapter", rank=rank)
-                model = load_lora_model(model_name, args.torch_dtype, distributed_device, adapter_path)
-                eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
+                if args.eval_backend == "vllm":
+                    eval_metrics = evaluate_model_with_vllm(
+                        model_name,
+                        tokenizer,
+                        eval_rows,
+                        args,
+                        adapter_path=adapter_path,
+                    )
+                else:
+                    model = load_lora_model(model_name, args.torch_dtype, distributed_device, adapter_path)
+                    eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
+                    del model
+                    clear_cuda()
                 eval_metrics = {
                     **eval_metrics,
                     "block_idx": start_block_idx - 1,
@@ -565,8 +618,6 @@ def main():
                 pd.DataFrame(eval_records).to_csv(output_dir / "eval_metrics.csv", index=False)
                 if wandb_run is not None:
                     wandb_run.log(eval_metrics, step=global_step)
-                del model
-                clear_cuda()
             sync_point(distributed, local_rank, rank, "[eval-only] eval outputs written")
             if rank == 0 and wandb_run is not None:
                 wandb_run.finish()
