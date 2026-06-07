@@ -536,36 +536,56 @@ def evaluate_model(model, tokenizer, eval_rows, args):
         return {}
 
     raw_model = unwrap_model(model)
+    had_gradient_checkpointing = bool(
+        getattr(raw_model, "is_gradient_checkpointing", False)
+        or getattr(getattr(raw_model, "model", None), "gradient_checkpointing", False)
+    )
     raw_model.eval()
+    if had_gradient_checkpointing and hasattr(raw_model, "gradient_checkpointing_disable"):
+        raw_model.gradient_checkpointing_disable()
     rewards = []
     boxed = []
-    for row in tqdm(eval_rows, desc="eval", leave=False):
-        prompt = format_prompt(row["prompt"], args.model, tokenizer, cot=True)
-        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(first_model_device(raw_model))
-        attention_mask = torch.ones_like(input_ids)
-        with torch.no_grad():
-            original_use_cache = getattr(getattr(raw_model, "config", None), "use_cache", None)
-            if hasattr(raw_model, "config"):
-                raw_model.config.use_cache = True
-            try:
-                output = raw_model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=args.eval_max_new_tokens,
-                    do_sample=args.eval_do_sample,
-                    temperature=args.eval_temperature,
-                    eos_token_id=tokenizer.eos_token_id,
-                    pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-                )
-            finally:
-                if original_use_cache is not None and hasattr(raw_model, "config"):
-                    raw_model.config.use_cache = original_use_cache
-        completion = tokenizer.decode(output[0][input_ids.shape[1]:], skip_special_tokens=True)
-        reward, parsed = score_completion(completion, row["answer"])
-        rewards.append(reward)
-        boxed.append(parsed is not None)
+    original_use_cache = getattr(getattr(raw_model, "config", None), "use_cache", None)
+    if hasattr(raw_model, "config"):
+        raw_model.config.use_cache = True
+    try:
+        for row in tqdm(eval_rows, desc="eval", leave=False):
+            prompt = format_prompt(row["prompt"], args.model, tokenizer, cot=True)
+            input_ids = tokenizer.encode(prompt, return_tensors="pt").to(first_model_device(raw_model))
+            attention_mask = torch.ones_like(input_ids)
+            generate_kwargs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "max_new_tokens": args.eval_max_new_tokens,
+                "do_sample": args.eval_do_sample,
+                "eos_token_id": tokenizer.eos_token_id,
+                "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id,
+            }
+            if args.eval_do_sample:
+                generate_kwargs["temperature"] = args.eval_temperature
 
-    raw_model.train()
+            with torch.no_grad():
+                output = raw_model.generate(**generate_kwargs)
+
+            completion = tokenizer.decode(output[0][input_ids.shape[1]:], skip_special_tokens=True)
+            reward, parsed = score_completion(completion, row["answer"])
+            rewards.append(reward)
+            boxed.append(parsed is not None)
+
+            del output
+            del input_ids
+            del attention_mask
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    finally:
+        if original_use_cache is not None and hasattr(raw_model, "config"):
+            raw_model.config.use_cache = original_use_cache
+        if had_gradient_checkpointing and hasattr(raw_model, "gradient_checkpointing_enable"):
+            try:
+                raw_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            except TypeError:
+                raw_model.gradient_checkpointing_enable()
+        raw_model.train()
     return {
         "eval/accuracy": float(np.mean(rewards)),
         "eval/boxed_rate": float(np.mean(boxed)),

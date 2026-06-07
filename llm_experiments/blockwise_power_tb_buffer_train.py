@@ -467,6 +467,7 @@ def main():
     parser.add_argument("--wandb_id", type=str, default=None)
     parser.add_argument("--wandb_resume", type=str, default="allow")
     parser.add_argument("--eval_every_block", action="store_true")
+    parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--eval_examples", type=int, default=100)
     parser.add_argument("--eval_max_new_tokens", type=int, default=3072)
     parser.add_argument("--eval_temperature", type=float, default=0.25)
@@ -538,11 +539,39 @@ def main():
         wandb_run = maybe_init_wandb(args, rank, resume_state)
         if rank == 0 and wandb_run is not None and args.wandb_id is None:
             args.wandb_id = wandb_run.id
-        debug_log("startup complete; entering block loop", rank=rank)
+        if args.eval_only:
+            debug_log("startup complete; entering eval-only path", rank=rank)
+        else:
+            debug_log("startup complete; entering block loop", rank=rank)
 
         metrics = []
         sample_records = []
         eval_records = []
+
+        if args.eval_only:
+            if not args.resume_from_checkpoint:
+                raise ValueError("--eval_only requires --resume_from_checkpoint")
+            if rank == 0:
+                debug_log("[eval-only] loading model from checkpoint adapter", rank=rank)
+                model = load_lora_model(model_name, args.torch_dtype, distributed_device, adapter_path)
+                eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
+                eval_metrics = {
+                    **eval_metrics,
+                    "block_idx": start_block_idx - 1,
+                    "step": global_step,
+                }
+                eval_records.append(eval_metrics)
+                print(eval_metrics, flush=True)
+                pd.DataFrame(eval_records).to_csv(output_dir / "eval_metrics.csv", index=False)
+                if wandb_run is not None:
+                    wandb_run.log(eval_metrics, step=global_step)
+                del model
+                clear_cuda()
+            sync_point(distributed, local_rank, rank, "[eval-only] eval outputs written")
+            if rank == 0 and wandb_run is not None:
+                wandb_run.finish()
+            cleanup_distributed(distributed)
+            return
 
         for block_idx in range(start_block_idx, args.num_blocks + 1):
             stage_adapter_path = adapter_path
