@@ -3,7 +3,6 @@ import json
 import os
 import random
 import shutil
-from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -38,30 +37,8 @@ def seed_everything(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def init_distributed(timeout_minutes=60):
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    if world_size == 1:
-        return False, 0, 0, 1, None
-
-    local_rank = int(os.environ["LOCAL_RANK"])
-    rank = int(os.environ["RANK"])
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl", timeout=timedelta(minutes=timeout_minutes))
-    return True, rank, local_rank, world_size, torch.device(f"cuda:{local_rank}")
-
-
-def cleanup_distributed(enabled):
-    if enabled:
-        dist.destroy_process_group()
-
-
 def unwrap_model(model):
     return model.module if isinstance(model, DDP) else model
-
-
-def rank_print(rank, *args, **kwargs):
-    if rank == 0:
-        print(*args, **kwargs)
 
 
 def load_math_dataset(path):
@@ -490,17 +467,6 @@ def load_checkpoint_state(checkpoint_dir, optimizer=None, optimizer_device=None)
     np.random.set_state(training_state["numpy_rng_state"])
     random.setstate(training_state["python_rng_state"])
     return training_state["state"]
-
-
-def read_csv_if_nonempty(path):
-    if path.stat().st_size == 0:
-        return None
-    try:
-        return pd.read_csv(path)
-    except pd.errors.EmptyDataError:
-        return None
-
-
 def maybe_init_wandb(args, rank, resume_state):
     if not args.use_wandb or rank != 0:
         return None
@@ -631,9 +597,12 @@ def main():
     parser.add_argument("--eval_max_new_tokens", type=int, default=3072)
     parser.add_argument("--eval_temperature", type=float, default=0.25)
     parser.add_argument("--eval_do_sample", action="store_true")
-    parser.add_argument("--ddp_timeout_minutes", type=int, default=60)
     args = parser.parse_args()
-    distributed, rank, local_rank, world_size, distributed_device = init_distributed(args.ddp_timeout_minutes)
+    distributed = False
+    rank = 0
+    local_rank = 0
+    world_size = 1
+    distributed_device = None
 
     if args.completions_per_prefix < 2:
         print(
@@ -650,10 +619,7 @@ def main():
 
     seed_everything(args.seed + rank)
     output_dir = Path(args.output_dir)
-    if rank == 0:
-        output_dir.mkdir(parents=True, exist_ok=True)
-    if distributed:
-        dist.barrier()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     resume_state = None
     adapter_path = None
@@ -679,13 +645,6 @@ def main():
     if args.gradient_checkpointing:
         enable_gradient_checkpointing(model)
     model.train()
-    if distributed:
-        model = DDP(
-            model,
-            device_ids=[local_rank],
-            output_device=local_rank,
-            find_unused_parameters=False,
-        )
     optimizer = torch.optim.AdamW(
         [param for param in model.parameters() if param.requires_grad],
         lr=args.lr,
@@ -835,13 +794,10 @@ def main():
 
         if args.save_every_block:
             block_dir = output_dir / f"block_{block_idx}"
-            if rank == 0:
-                unwrap_model(model).save_pretrained(block_dir)
-                tokenizer.save_pretrained(block_dir)
-            if distributed:
-                dist.barrier()
+            unwrap_model(model).save_pretrained(block_dir)
+            tokenizer.save_pretrained(block_dir)
 
-        if args.eval_every_block and rank == 0:
+        if args.eval_every_block:
             eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
             eval_metrics = {**eval_metrics, "block_idx": block_idx, "step": global_step}
             eval_records.append(eval_metrics)
@@ -849,55 +805,27 @@ def main():
             if wandb_run is not None:
                 wandb_run.log(eval_metrics, step=global_step)
 
-        if rank == 0:
-            checkpoint_state = {
-                "next_block_idx": block_idx + 1,
-                "global_step": global_step,
-                "wandb_id": wandb_run.id if wandb_run is not None else args.wandb_id,
-                "args": vars(args),
-            }
-            save_checkpoint(output_dir, model, tokenizer, optimizer, checkpoint_state, distributed=False)
-            if args.wandb_log_checkpoints:
-                wandb_log_checkpoint(wandb_run, output_dir / "checkpoint_latest")
-        if distributed:
-            dist.barrier()
+        checkpoint_state = {
+            "next_block_idx": block_idx + 1,
+            "global_step": global_step,
+            "wandb_id": wandb_run.id if wandb_run is not None else args.wandb_id,
+            "args": vars(args),
+        }
+        save_checkpoint(output_dir, model, tokenizer, optimizer, checkpoint_state, distributed=False)
+        if args.wandb_log_checkpoints:
+            wandb_log_checkpoint(wandb_run, output_dir / "checkpoint_latest")
 
-    pd.DataFrame(metrics).to_csv(output_dir / f"metrics_rank{rank}.csv", index=False)
+    pd.DataFrame(metrics).to_csv(output_dir / "metrics.csv", index=False)
     if args.save_samples:
-        pd.DataFrame(sample_records).to_csv(output_dir / f"samples_rank{rank}.csv", index=False)
-    if rank == 0 and eval_records:
+        pd.DataFrame(sample_records).to_csv(output_dir / "samples.csv", index=False)
+    if eval_records:
         pd.DataFrame(eval_records).to_csv(output_dir / "eval_metrics.csv", index=False)
 
-    if distributed:
-        dist.barrier()
+    unwrap_model(model).save_pretrained(output_dir / "final")
+    tokenizer.save_pretrained(output_dir / "final")
 
-    if rank == 0:
-        unwrap_model(model).save_pretrained(output_dir / "final")
-        tokenizer.save_pretrained(output_dir / "final")
-
-        metric_frames = [
-            frame
-            for path in sorted(output_dir.glob("metrics_rank*.csv"))
-            for frame in [read_csv_if_nonempty(path)]
-            if frame is not None
-        ]
-        if metric_frames:
-            pd.concat(metric_frames, ignore_index=True).to_csv(output_dir / "metrics.csv", index=False)
-
-        if args.save_samples:
-            sample_frames = [
-                frame
-                for path in sorted(output_dir.glob("samples_rank*.csv"))
-                for frame in [read_csv_if_nonempty(path)]
-                if frame is not None
-            ]
-            if sample_frames:
-                pd.concat(sample_frames, ignore_index=True).to_csv(output_dir / "samples.csv", index=False)
-
-        if wandb_run is not None:
-            wandb_run.finish()
-
-    cleanup_distributed(distributed)
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

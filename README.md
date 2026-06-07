@@ -34,20 +34,7 @@ sbatch llm_experiments/scripts/power_samp_math.sh
 ```
 The output is several .csv files (based on the shard and seed number) that store the response outputs, correct answers, original prompts, etc. 
 
-To run all five MATH500 shards across multiple GPUs and merge the results:
-
-```bash
-cd llm_experiments
-python run_math_multi_gpu.py --seed 0 --num_gpus 5
-```
-
-To select specific physical GPU IDs:
-
-```bash
-python run_math_multi_gpu.py --seed 0 --gpus 0,2,4,6
-```
-
-Each GPU runs at most one shard at a time. Per-shard logs and CSV files are stored under ```results/```, followed by one merged 500-row CSV.
+The maintained path in this repo is now single-process execution. If you want to shard or queue jobs across several GPUs, launch separate single-GPU processes externally rather than using the removed in-repo DDP launchers.
 
 ## Block-wise Power Distribution Matching
 
@@ -107,26 +94,10 @@ Then inspect every block's inputs, outputs, rewards, and log probabilities:
 python inspect_blockwise_samples.py results/blockwise_tb_debug --show_examples 2
 ```
 
-For multi-GPU block-wise training, launch with DDP:
+Optional experiment tracking, checkpoint resume, and block-end evaluation all work in the maintained single-process path:
 
 ```bash
-python run_blockwise_multi_gpu.py --gpus 0,1,2,3 -- \
-  --model qwen_math \
-  --max_examples 32 \
-  --num_blocks 16 \
-  --completions_per_prefix 2 \
-  --max_completion_tokens 512 \
-  --save_samples \
-  --save_every_block \
-  --output_dir results/blockwise_tb_ddp_32x16
-```
-
-Each GPU handles different prompts while synchronizing LoRA gradients. Rank-specific files are written as ```metrics_rank*.csv``` and ```samples_rank*.csv```, then rank 0 merges them into ```metrics.csv``` and ```samples.csv```.
-
-Optional experiment tracking, checkpoint resume, and block-end evaluation:
-
-```bash
-python run_blockwise_multi_gpu.py --gpus 0,1,2,3 -- \
+CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_train.py \
   --model qwen_math \
   --eval_data_path data/MATH500.json \
   --max_examples 32 \
@@ -145,14 +116,14 @@ python run_blockwise_multi_gpu.py --gpus 0,1,2,3 -- \
   --use_wandb \
   --wandb_project one-step-post-correction \
   --wandb_run_name blockwise-32x16 \
-  --output_dir results/blockwise_tb_ddp_32x16
+  --output_dir results/blockwise_tb_single_32x16
 ```
 
 The latest stage-boundary checkpoint is stored in ```checkpoint_latest```. Resume with:
 
 ```bash
-python run_blockwise_multi_gpu.py --gpus 0,1,2,3 -- \
-  --resume_from_checkpoint results/blockwise_tb_ddp_32x16/checkpoint_latest \
+CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_train.py \
+  --resume_from_checkpoint results/blockwise_tb_single_32x16/checkpoint_latest \
   --model qwen_math \
   --eval_data_path data/MATH500.json \
   --max_examples 32 \
@@ -170,16 +141,39 @@ python run_blockwise_multi_gpu.py --gpus 0,1,2,3 -- \
   --eval_max_new_tokens 3072 \
   --use_wandb \
   --wandb_resume allow \
-  --output_dir results/blockwise_tb_ddp_32x16
+  --output_dir results/blockwise_tb_single_32x16
 ```
 
 If the checkpoint has a wandb run id, the resumed run continues logging to the same wandb run. Checkpoints are uploaded as wandb artifacts only when ```--wandb_log_checkpoints``` is set.
 
-Synchronous buffer training decouples stage sampling from training. Rank 0 first samples a stage
-buffer with vLLM, then all DDP ranks train from the saved completions:
+Synchronous buffer training now follows a single-GPU, stage-by-stage workflow:
+
+1. Sample a block buffer with vLLM.
+2. Train from that saved buffer with ```blockwise_power_tb_buffer_train.py```.
+3. Repeat for the next block using ```checkpoint_latest/adapter```.
+
+Sample block 1:
 
 ```bash
-python run_blockwise_buffer_staged.py --gpus 0,1 -- \
+CUDA_VISIBLE_DEVICES=0 python blockwise_vllm_sample_buffer.py \
+  --data_path ../data/train.parquet \
+  --output_dir results/blockwise_buffer_small_qwen_seed0 \
+  --model qwen \
+  --block_idx 1 \
+  --max_examples 32 \
+  --block_size 192 \
+  --completions_per_prefix 4 \
+  --max_completion_tokens 3072 \
+  --temperature 0.25 \
+  --seed 0 \
+  --vllm_batch_size 8 \
+  --vllm_enforce_eager
+```
+
+Train from the sampled buffer:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_buffer_train.py \
   --data_path ../data/train.parquet \
   --eval_data_path data/MATH500.json \
   --model qwen \
@@ -188,7 +182,7 @@ python run_blockwise_buffer_staged.py --gpus 0,1 -- \
   --micro_batch_size 1 \
   --gradient_checkpointing \
   --epochs 1 \
-  --num_blocks 3 \
+  --num_blocks 1 \
   --block_size 192 \
   --completions_per_prefix 4 \
   --max_completion_tokens 3072 \
@@ -199,16 +193,54 @@ python run_blockwise_buffer_staged.py --gpus 0,1 -- \
   --seed 0 \
   --save_samples \
   --save_every_block \
+  --output_dir results/blockwise_buffer_small_qwen_seed0 \
+  --skip_buffer_sampling
+```
+
+Resume the next block from ```checkpoint_latest``` after sampling ```block_2.csv```:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_buffer_train.py \
+  --data_path ../data/train.parquet \
+  --eval_data_path data/MATH500.json \
+  --model qwen \
+  --max_examples 32 \
+  --batch_size 4 \
+  --micro_batch_size 1 \
+  --gradient_checkpointing \
+  --epochs 1 \
+  --num_blocks 2 \
+  --block_size 192 \
+  --completions_per_prefix 4 \
+  --max_completion_tokens 3072 \
+  --temperature 0.25 \
+  --alpha 4.0 \
+  --beta 1.0 \
+  --lr 1e-5 \
+  --seed 0 \
+  --save_samples \
+  --save_every_block \
+  --output_dir results/blockwise_buffer_small_qwen_seed0 \
+  --skip_buffer_sampling \
+  --resume_from_checkpoint results/blockwise_buffer_small_qwen_seed0/checkpoint_latest
+```
+
+For stable checkpoint evaluation, use the eval-only vLLM backend:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_buffer_train.py \
+  --data_path ../data/train.parquet \
+  --eval_data_path data/MATH500.json \
+  --model qwen \
+  --eval_only \
+  --eval_backend vllm \
   --eval_every_block \
   --eval_examples 100 \
   --eval_max_new_tokens 3072 \
-  --vllm_batch_size 8 \
-  --vllm_visible_devices 0 \
+  --vllm_batch_size 2 \
   --vllm_enforce_eager \
-  --ddp_timeout_minutes 120 \
-  --use_wandb \
-  --wandb_run_name buffer-small-qwen-seed0 \
-  --output_dir results/blockwise_buffer_small_qwen_seed0
+  --output_dir results/blockwise_buffer_small_qwen_seed0 \
+  --resume_from_checkpoint results/blockwise_buffer_small_qwen_seed0/checkpoint_latest
 ```
 
 By default, the trainer scores multiple completions for each prompt in parallel. If this exceeds
