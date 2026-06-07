@@ -120,6 +120,7 @@ def main():
         start_block = int(state.get("next_block_idx", 1))
 
     for block_idx in range(start_block, known.num_blocks + 1):
+        print(f"[stage {block_idx}] preparing sampler", flush=True)
         adapter_path = Path(checkpoint) / "adapter" if checkpoint else None
         sampler_cmd = [
             sys.executable,
@@ -163,6 +164,7 @@ def main():
             sampler_cmd.append("--vllm_disable_custom_all_reduce")
         print("vLLM CUDA_VISIBLE_DEVICES:", vllm_env.get("CUDA_VISIBLE_DEVICES"), flush=True)
         run(sampler_cmd, vllm_env)
+        print(f"[stage {block_idx}] sampler complete; launching DDP training", flush=True)
 
         block_args = list(training_args)
         block_args = set_option(block_args, "--num_blocks", block_idx)
@@ -186,6 +188,7 @@ def main():
         ]
         print("DDP CUDA_VISIBLE_DEVICES:", ddp_env.get("CUDA_VISIBLE_DEVICES"), flush=True)
         run(train_cmd, ddp_env)
+        print(f"[stage {block_idx}] training complete", flush=True)
         checkpoint = str(Path(known.output_dir) / "checkpoint_latest")
 
 
