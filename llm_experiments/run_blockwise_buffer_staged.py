@@ -198,6 +198,7 @@ def main():
         block_args = set_option(block_args, "--num_blocks", block_idx)
         block_args = add_flag(block_args, "--skip_buffer_sampling")
         block_args = remove_option(block_args, "--vllm_visible_devices")
+        block_args = remove_option(block_args, "--reuse_existing_buffers")
         if checkpoint:
             block_args = set_option(block_args, "--resume_from_checkpoint", checkpoint)
         else:
