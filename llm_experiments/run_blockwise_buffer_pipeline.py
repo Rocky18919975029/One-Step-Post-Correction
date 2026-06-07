@@ -130,6 +130,18 @@ def build_train_command(args, block_idx, output_dir):
         command.append("--save_every_block")
     if args.score_micro_batch_size is not None:
         command.extend(["--score_micro_batch_size", str(args.score_micro_batch_size)])
+    if args.use_wandb:
+        command.append("--use_wandb")
+    if args.wandb_project is not None:
+        command.extend(["--wandb_project", args.wandb_project])
+    if args.wandb_entity is not None:
+        command.extend(["--wandb_entity", args.wandb_entity])
+    if args.wandb_run_name is not None:
+        command.extend(["--wandb_run_name", args.wandb_run_name])
+    if args.wandb_id is not None:
+        command.extend(["--wandb_id", args.wandb_id])
+    if args.wandb_resume is not None:
+        command.extend(["--wandb_resume", args.wandb_resume])
     ckpt_dir = checkpoint_dir(output_dir)
     if ckpt_dir.exists():
         command.extend(["--resume_from_checkpoint", str(ckpt_dir)])
@@ -168,6 +180,18 @@ def build_eval_command(args, output_dir):
     if args.eval_do_sample:
         command.append("--eval_do_sample")
         command.extend(["--eval_temperature", str(args.eval_temperature)])
+    if args.use_wandb:
+        command.append("--use_wandb")
+    if args.wandb_project is not None:
+        command.extend(["--wandb_project", args.wandb_project])
+    if args.wandb_entity is not None:
+        command.extend(["--wandb_entity", args.wandb_entity])
+    if args.wandb_run_name is not None:
+        command.extend(["--wandb_run_name", args.wandb_run_name])
+    if args.wandb_id is not None:
+        command.extend(["--wandb_id", args.wandb_id])
+    if args.wandb_resume is not None:
+        command.extend(["--wandb_resume", args.wandb_resume])
     return command
 
 
@@ -241,6 +265,12 @@ def main():
     parser.add_argument("--vllm_enforce_eager", action="store_true")
     parser.add_argument("--vllm_disable_custom_all_reduce", action="store_true")
     parser.add_argument("--debug_dump_timeout_seconds", type=int, default=60)
+    parser.add_argument("--use_wandb", action="store_true")
+    parser.add_argument("--wandb_project", type=str, default="one-step-post-correction")
+    parser.add_argument("--wandb_entity", type=str, default=None)
+    parser.add_argument("--wandb_run_name", type=str, default=None)
+    parser.add_argument("--wandb_id", type=str, default=None)
+    parser.add_argument("--wandb_resume", type=str, default="allow")
     args = parser.parse_args()
 
     apply_smoke_defaults(args)
