@@ -434,6 +434,7 @@ def main():
     parser.add_argument("--vllm_visible_devices", type=str, default=None)
     parser.add_argument("--vllm_enforce_eager", action="store_true")
     parser.add_argument("--vllm_disable_custom_all_reduce", action="store_true")
+    parser.add_argument("--skip_buffer_sampling", action="store_true")
     args = parser.parse_args()
 
     distributed, rank, local_rank, world_size, distributed_device = init_distributed(args.ddp_timeout_minutes)
@@ -473,12 +474,14 @@ def main():
 
     for block_idx in range(start_block_idx, args.num_blocks + 1):
         stage_adapter_path = adapter_path
-        if rank == 0:
+        if rank == 0 and not args.skip_buffer_sampling:
             generate_stage_buffer_subprocess(block_idx, args, stage_adapter_path)
         if distributed:
             dist.barrier()
 
         buffer_path = output_dir / "buffers" / f"block_{block_idx}.csv"
+        if not buffer_path.exists():
+            raise FileNotFoundError(f"Missing sampled buffer for block {block_idx}: {buffer_path}")
         buffer_df = pd.read_csv(buffer_path)
 
         model = load_lora_model(model_name, args.torch_dtype, distributed_device, stage_adapter_path)

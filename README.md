@@ -179,7 +179,7 @@ Synchronous buffer training decouples stage sampling from training. Rank 0 first
 buffer with vLLM, then all DDP ranks train from the saved completions:
 
 ```bash
-python run_blockwise_buffer_multi_gpu.py --gpus 0,1 -- \
+python run_blockwise_buffer_staged.py --gpus 0,1 -- \
   --data_path ../data/train.parquet \
   --eval_data_path data/MATH500.json \
   --model qwen \
