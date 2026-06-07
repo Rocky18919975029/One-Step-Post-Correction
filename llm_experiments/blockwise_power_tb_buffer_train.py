@@ -446,35 +446,49 @@ def main():
     args = parser.parse_args()
 
     distributed, rank, local_rank, world_size, distributed_device = init_distributed(args.ddp_timeout_minutes)
+    print(f"[rank{rank}] distributed init complete", flush=True)
     seed_everything(args.seed + rank)
 
     output_dir = Path(args.output_dir)
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
     if distributed:
-        dist.barrier()
+        print(f"[rank{rank}] output dir ready (pre-barrier)", flush=True)
+        dist.barrier(device_ids=[local_rank])
+        print(f"[rank{rank}] output dir ready (post-barrier)", flush=True)
 
+    print(f"[rank{rank}] loading datasets", flush=True)
     dataset = load_math_dataset(args.data_path)[: args.max_examples]
     eval_rows = load_math_dataset(args.eval_data_path)[: args.eval_examples] if args.eval_every_block else []
+    print(f"[rank{rank}] loaded datasets train={len(dataset)} eval={len(eval_rows)}", flush=True)
     model_name = MODEL_NAME_BY_KEY[args.model]
+    print(f"[rank{rank}] loading tokenizer for {model_name}", flush=True)
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
+    print(f"[rank{rank}] tokenizer ready", flush=True)
 
     resume_state = None
     start_block_idx = 1
     global_step = 0
     adapter_path = None
     if args.resume_from_checkpoint:
+        print(f"[rank{rank}] reading resume state from {args.resume_from_checkpoint}", flush=True)
         checkpoint_dir = Path(args.resume_from_checkpoint)
         adapter_path = checkpoint_dir / "adapter"
         resume_state = torch.load(checkpoint_dir / "training_state.pt", map_location="cpu", weights_only=False)["state"]
         start_block_idx = int(resume_state.get("next_block_idx", 1))
         global_step = int(resume_state.get("global_step", 0))
+        print(
+            f"[rank{rank}] resume state ready next_block_idx={start_block_idx} global_step={global_step}",
+            flush=True,
+        )
 
+    print(f"[rank{rank}] initializing wandb state", flush=True)
     wandb_run = maybe_init_wandb(args, rank, resume_state)
     if rank == 0 and wandb_run is not None and args.wandb_id is None:
         args.wandb_id = wandb_run.id
+    print(f"[rank{rank}] startup complete; entering block loop", flush=True)
 
     metrics = []
     sample_records = []
