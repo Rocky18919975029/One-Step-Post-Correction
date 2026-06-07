@@ -3,6 +3,7 @@ import json
 import os
 import random
 import shutil
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -37,7 +38,7 @@ def seed_everything(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def init_distributed():
+def init_distributed(timeout_minutes=60):
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if world_size == 1:
         return False, 0, 0, 1, None
@@ -45,7 +46,7 @@ def init_distributed():
     local_rank = int(os.environ["LOCAL_RANK"])
     rank = int(os.environ["RANK"])
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend="nccl", timeout=timedelta(minutes=timeout_minutes))
     return True, rank, local_rank, world_size, torch.device(f"cuda:{local_rank}")
 
 
@@ -591,8 +592,9 @@ def main():
     parser.add_argument("--eval_max_new_tokens", type=int, default=3072)
     parser.add_argument("--eval_temperature", type=float, default=0.25)
     parser.add_argument("--eval_do_sample", action="store_true")
+    parser.add_argument("--ddp_timeout_minutes", type=int, default=60)
     args = parser.parse_args()
-    distributed, rank, local_rank, world_size, distributed_device = init_distributed()
+    distributed, rank, local_rank, world_size, distributed_device = init_distributed(args.ddp_timeout_minutes)
 
     if args.completions_per_prefix < 2:
         print(
