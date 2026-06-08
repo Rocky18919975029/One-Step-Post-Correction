@@ -167,7 +167,18 @@ def evaluate_model_with_vllm(model_name, tokenizer, eval_rows, args, adapter_pat
     }
 
 
-def generate_stage_buffer(model_name, tokenizer, dataset, block_idx, args, adapter_path, output_dir):
+def generate_stage_buffer(
+    model_name,
+    tokenizer,
+    dataset,
+    block_idx,
+    args,
+    adapter_path,
+    output_dir,
+    *,
+    example_idx_offset=0,
+    buffer_path_override=None,
+):
     prompts = [format_prompt(row["prompt"], args.model, tokenizer, cot=True) for row in dataset]
     stage_token_limit = partial_completion_token_limit(block_idx, args)
     future_completions_per_partial = (
@@ -191,7 +202,8 @@ def generate_stage_buffer(model_name, tokenizer, dataset, block_idx, args, adapt
 
         future_prompts = []
         future_metadata = []
-        for example_idx, (row, prompt_text, partials) in enumerate(zip(dataset, prompts, partial_completion_outputs)):
+        for local_example_idx, (row, prompt_text, partials) in enumerate(zip(dataset, prompts, partial_completion_outputs)):
+            example_idx = example_idx_offset + local_example_idx
             for sample_idx, partial_completion in enumerate(partials):
                 partial_prefix = prompt_text + partial_completion
                 partial_token_len = len(tokenizer.encode(partial_completion, add_special_tokens=False))
@@ -262,9 +274,13 @@ def generate_stage_buffer(model_name, tokenizer, dataset, block_idx, args, adapt
             }
         )
 
-    buffer_dir = output_dir / "buffers"
-    buffer_dir.mkdir(parents=True, exist_ok=True)
-    buffer_path = buffer_dir / f"block_{block_idx}.csv"
+    if buffer_path_override is None:
+        buffer_dir = output_dir / "buffers"
+        buffer_dir.mkdir(parents=True, exist_ok=True)
+        buffer_path = buffer_dir / f"block_{block_idx}.csv"
+    else:
+        buffer_path = Path(buffer_path_override)
+        buffer_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(records).to_csv(buffer_path, index=False)
     print(f"Saved buffer {buffer_path}: {len(records)} samples", flush=True)
     return buffer_path
