@@ -82,18 +82,16 @@ def load_lora_model(model_name, torch_dtype, device=None, adapter_path=None):
         ) from exc
 
     if device is None:
-        base_model = transformers.AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=parse_torch_dtype(torch_dtype),
-            device_map="auto",
-            trust_remote_code=True,
-        )
-    else:
-        base_model = transformers.AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=parse_torch_dtype(torch_dtype),
-            trust_remote_code=True,
-        ).to(device)
+        if torch.cuda.is_available():
+            device = torch.device("cuda:0")
+        else:
+            device = torch.device("cpu")
+
+    base_model = transformers.AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=parse_torch_dtype(torch_dtype),
+        trust_remote_code=True,
+    ).to(device)
     config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=16,
