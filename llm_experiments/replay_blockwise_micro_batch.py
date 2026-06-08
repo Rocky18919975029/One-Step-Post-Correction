@@ -19,7 +19,7 @@ from blockwise_power_tb_train import (
 def main():
     parser = argparse.ArgumentParser(description="Replay one dumped blockwise micro-batch against a saved checkpoint.")
     parser.add_argument("--checkpoint_dir", type=str, required=True)
-    parser.add_argument("--micro_batch_csv", type=str, required=True)
+    parser.add_argument("--micro_batch_csv", type=str, action="append", required=True)
     parser.add_argument("--model", type=str, default=None, choices=sorted(MODEL_NAME_BY_KEY))
     parser.add_argument("--torch_dtype", type=str, default=None, choices=["auto", "bfloat16", "float16", "float32"])
     parser.add_argument("--attn_implementation", type=str, default=None, choices=["eager", "sdpa", "flash_attention_2"])
@@ -30,6 +30,7 @@ def main():
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--run_backward", action="store_true")
     parser.add_argument("--run_optimizer_step", action="store_true")
+    parser.add_argument("--disable_backward_scaling", action="store_true")
     args = parser.parse_args()
 
     checkpoint_dir = Path(args.checkpoint_dir)
@@ -65,7 +66,7 @@ def main():
     gradient_checkpointing = args.gradient_checkpointing or bool(saved_args.get("gradient_checkpointing", False))
 
     print(f"checkpoint_dir={checkpoint_dir}", flush=True)
-    print(f"micro_batch_csv={args.micro_batch_csv}", flush=True)
+    print(f"micro_batch_csvs={args.micro_batch_csv}", flush=True)
     print(
         f"model={model_key} torch_dtype={torch_dtype} attn_implementation={attn_implementation} "
         f"alpha={alpha} beta={beta} completions_per_prefix={completions_per_prefix} "
@@ -96,44 +97,56 @@ def main():
     )
     load_checkpoint_state(checkpoint_dir, optimizer if args.run_optimizer_step else None, device)
 
-    micro_df = pd.read_csv(args.micro_batch_csv)
-    sequences, prompt_lens, attention_masks, rewards = encode_buffer_group(
-        tokenizer,
-        micro_df,
-        device,
-    )
-    print(
-        f"rows={len(micro_df)} seq_shape={tuple(sequences.shape)} max_prompt_len={max(prompt_lens)} "
-        f"reward_mean={float(rewards.mean().detach().cpu()):.4f}",
-        flush=True,
-    )
-
-    print("loss forward begin", flush=True)
-    loss, logp_theta, logp_ref = vargrad_tb_loss(
-        model,
-        tokenizer,
-        sequences,
-        prompt_lens,
-        attention_masks,
-        rewards,
-        alpha,
-        beta,
-        completions_per_prefix,
-        score_micro_batch_size,
-    )
-    print("loss forward end", flush=True)
-    print(
-        f"loss={float(loss.detach().cpu()):.6f} "
-        f"logp_theta_mean={float(logp_theta.mean().detach().cpu()):.6f} "
-        f"logp_ref_mean={float(logp_ref.mean().detach().cpu()):.6f}",
-        flush=True,
-    )
-
     if args.run_backward or args.run_optimizer_step:
         optimizer.zero_grad(set_to_none=True)
-        print("backward begin", flush=True)
-        loss.backward()
-        print("backward end", flush=True)
+
+    total_sequences = int(saved_args.get("batch_size", 1)) * completions_per_prefix
+    for idx, micro_batch_csv in enumerate(args.micro_batch_csv, start=1):
+        print(f"=== replay {idx}/{len(args.micro_batch_csv)}: {micro_batch_csv} ===", flush=True)
+        micro_df = pd.read_csv(micro_batch_csv)
+        sequences, prompt_lens, attention_masks, rewards = encode_buffer_group(
+            tokenizer,
+            micro_df,
+            device,
+        )
+        print(
+            f"rows={len(micro_df)} seq_shape={tuple(sequences.shape)} max_prompt_len={max(prompt_lens)} "
+            f"reward_mean={float(rewards.mean().detach().cpu()):.4f}",
+            flush=True,
+        )
+
+        print("loss forward begin", flush=True)
+        loss, logp_theta, logp_ref = vargrad_tb_loss(
+            model,
+            tokenizer,
+            sequences,
+            prompt_lens,
+            attention_masks,
+            rewards,
+            alpha,
+            beta,
+            completions_per_prefix,
+            score_micro_batch_size,
+        )
+        print("loss forward end", flush=True)
+        print(
+            f"loss={float(loss.detach().cpu()):.6f} "
+            f"logp_theta_mean={float(logp_theta.mean().detach().cpu()):.6f} "
+            f"logp_ref_mean={float(logp_ref.mean().detach().cpu()):.6f}",
+            flush=True,
+        )
+
+        if args.run_backward or args.run_optimizer_step:
+            backward_loss = loss
+            if not args.disable_backward_scaling:
+                backward_loss = loss * (len(micro_df) / total_sequences)
+                print(
+                    f"backward scale={len(micro_df)}/{total_sequences}={len(micro_df) / total_sequences:.6f}",
+                    flush=True,
+                )
+            print("backward begin", flush=True)
+            backward_loss.backward()
+            print("backward end", flush=True)
 
     if args.run_optimizer_step:
         print("optimizer step begin", flush=True)
