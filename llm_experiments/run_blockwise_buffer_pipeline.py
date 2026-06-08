@@ -345,7 +345,7 @@ def main():
     parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument("--wandb_id", type=str, default=None)
     parser.add_argument("--wandb_resume", type=str, default="allow")
-    parser.add_argument("--wandb_log_every", type=int, default=5)
+    parser.add_argument("--wandb_log_every", type=int, default=0)
     args = parser.parse_args()
 
     apply_smoke_defaults(args)

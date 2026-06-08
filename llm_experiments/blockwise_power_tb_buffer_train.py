@@ -87,7 +87,9 @@ def log_point(label, rank=0):
 
 
 def should_log_wandb_step(args, step):
-    return args.wandb_log_every <= 1 or step % args.wandb_log_every == 0
+    if args.wandb_log_every <= 0:
+        return False
+    return args.wandb_log_every == 1 or step % args.wandb_log_every == 0
 
 
 def load_vllm(model_name, args, adapter_path=None):
@@ -548,7 +550,9 @@ def train_stage_from_buffer(
             metrics.append(record)
             print(record, flush=True)
             if wandb_run is not None and should_log_wandb_step(args, global_step):
+                debug_log(f"[block {block_idx}] wandb step log begin step={global_step}", rank=rank)
                 wandb_run.log(record, step=global_step)
+                debug_log(f"[block {block_idx}] wandb step log end step={global_step}", rank=rank)
             if checkpoint_callback is not None and args.save_every_steps and global_step % args.save_every_steps == 0:
                 checkpoint_callback(
                     current_block_idx=block_idx,
@@ -594,7 +598,7 @@ def main():
     parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument("--wandb_id", type=str, default=None)
     parser.add_argument("--wandb_resume", type=str, default="allow")
-    parser.add_argument("--wandb_log_every", type=int, default=5)
+    parser.add_argument("--wandb_log_every", type=int, default=0)
     parser.add_argument("--eval_every_block", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--eval_backend", type=str, default="hf", choices=["hf", "vllm"])
@@ -708,7 +712,9 @@ def main():
             print(eval_metrics, flush=True)
             pd.DataFrame(eval_records).to_csv(output_dir / "eval_metrics.csv", index=False)
             if wandb_run is not None:
+                debug_log("[eval-only] wandb eval log begin", rank=rank)
                 wandb_run.log(eval_metrics, step=global_step)
+                debug_log("[eval-only] wandb eval log end", rank=rank)
             log_point("[eval-only] eval outputs written", rank=rank)
             if wandb_run is not None:
                 wandb_run.finish()
@@ -803,7 +809,9 @@ def main():
                 eval_records.append(eval_metrics)
                 print(eval_metrics, flush=True)
                 if wandb_run is not None:
+                    debug_log(f"[block {block_idx}] wandb eval log begin", rank=rank)
                     wandb_run.log(eval_metrics, step=global_step)
+                    debug_log(f"[block {block_idx}] wandb eval log end", rank=rank)
 
             checkpoint_state = build_checkpoint_state(
                 args,
