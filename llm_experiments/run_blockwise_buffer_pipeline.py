@@ -1,4 +1,5 @@
 import argparse
+import csv
 import os
 import subprocess
 import sys
@@ -14,6 +15,10 @@ def checkpoint_dir(output_dir):
 
 def checkpoint_adapter_dir(output_dir):
     return checkpoint_dir(output_dir) / "adapter"
+
+
+def buffer_path(output_dir, block_idx):
+    return Path(output_dir) / "buffers" / f"block_{block_idx}.csv"
 
 
 def read_next_block_idx(output_dir):
@@ -37,6 +42,61 @@ def run_step(step_idx, total_steps, title, command, env):
 
 def parse_gpu_list(gpu_spec):
     return [part.strip() for part in str(gpu_spec).split(",") if part.strip()]
+
+
+def is_complete_buffer(output_dir, block_idx, args):
+    path = buffer_path(output_dir, block_idx)
+    if not path.exists():
+        return False
+
+    required_columns = {
+        "block_idx",
+        "example_idx",
+        "sample_idx",
+        "question",
+        "correct_answer",
+        "prefix_token_len",
+        "prefix_text",
+        "completion_token_len",
+        "completion",
+        "reward",
+    }
+    expected_rows = args.max_examples * args.completions_per_prefix
+    per_example_counts = {}
+
+    try:
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = set(reader.fieldnames or [])
+            if not required_columns.issubset(fieldnames):
+                return False
+
+            row_count = 0
+            for row in reader:
+                row_count += 1
+                try:
+                    example_idx = int(row["example_idx"])
+                    sample_idx = int(row["sample_idx"])
+                    block_value = int(row["block_idx"])
+                except (TypeError, ValueError):
+                    return False
+
+                if block_value != block_idx:
+                    return False
+                if not (0 <= example_idx < args.max_examples):
+                    return False
+                if not (0 <= sample_idx < args.completions_per_prefix):
+                    return False
+                per_example_counts.setdefault(example_idx, set()).add(sample_idx)
+
+            if row_count != expected_rows:
+                return False
+    except Exception:
+        return False
+
+    if len(per_example_counts) != args.max_examples:
+        return False
+    return all(len(sample_ids) == args.completions_per_prefix for sample_ids in per_example_counts.values())
 
 
 def build_sampler_command(args, block_idx, output_dir):
@@ -324,13 +384,20 @@ def main():
     step_idx = 1
 
     for block_idx in range(start_block, args.num_blocks + 1):
-        run_step(
-            step_idx,
-            total_steps,
-            f"Sampling block {block_idx} with vLLM",
-            build_sampler_command(args, block_idx, output_dir),
-            sampler_env,
-        )
+        if is_complete_buffer(output_dir, block_idx, args):
+            banner = f"[{step_idx}/{total_steps}] Reusing sampled buffer for block {block_idx}"
+            print("\n" + "=" * len(banner), flush=True)
+            print(banner, flush=True)
+            print("=" * len(banner), flush=True)
+            print(f"Found complete buffer at {buffer_path(output_dir, block_idx)}; skipping sampling.", flush=True)
+        else:
+            run_step(
+                step_idx,
+                total_steps,
+                f"Sampling block {block_idx} with vLLM",
+                build_sampler_command(args, block_idx, output_dir),
+                sampler_env,
+            )
         step_idx += 1
 
         run_step(
