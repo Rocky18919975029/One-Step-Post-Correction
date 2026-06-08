@@ -102,8 +102,11 @@ def is_complete_buffer(output_dir, block_idx, args):
 def build_sampler_command(args, block_idx, output_dir):
     sampler_tp_size = args.vllm_tensor_parallel_size
     sampler_gpu_count = len(parse_gpu_list(args.sampler_gpus))
+    disable_custom_all_reduce = args.vllm_disable_custom_all_reduce
     if sampler_gpu_count > 1 and sampler_tp_size == 1:
         sampler_tp_size = sampler_gpu_count
+    if sampler_gpu_count > 1:
+        disable_custom_all_reduce = True
     command = [
         sys.executable,
         "blockwise_vllm_sample_buffer.py",
@@ -145,7 +148,7 @@ def build_sampler_command(args, block_idx, output_dir):
         command.extend(["--adapter_path", str(adapter_dir)])
     if args.vllm_enforce_eager:
         command.append("--vllm_enforce_eager")
-    if args.vllm_disable_custom_all_reduce:
+    if disable_custom_all_reduce:
         command.append("--vllm_disable_custom_all_reduce")
     return command
 
@@ -367,6 +370,8 @@ def main():
     sampler_env = base_env.copy()
     sampler_env["CUDA_VISIBLE_DEVICES"] = args.sampler_gpus
     sampler_env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    if len(parse_gpu_list(args.sampler_gpus)) > 1:
+        sampler_env.setdefault("NCCL_P2P_DISABLE", "1")
 
     train_env = base_env.copy()
     train_env["CUDA_VISIBLE_DEVICES"] = args.gpu
