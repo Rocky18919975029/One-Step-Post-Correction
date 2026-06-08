@@ -455,6 +455,10 @@ def train_stage_from_buffer(
             batch_indices = rank_order[start:start + args.batch_size]
             optimizer.zero_grad(set_to_none=True)
             step_id = global_step + 1
+            debug_log(
+                f"[block {block_idx}] step {step_id} begin epoch={epoch} batch_start={start} batch_size={len(batch_indices)}",
+                rank=rank,
+            )
 
             loss_sum = 0.0
             reward_sum = 0.0
@@ -464,6 +468,10 @@ def train_stage_from_buffer(
 
             for micro_start in range(0, len(batch_indices), args.micro_batch_size):
                 micro_indices = batch_indices[micro_start:micro_start + args.micro_batch_size]
+                debug_log(
+                    f"[block {block_idx}] step {step_id} micro begin micro_start={micro_start} micro_size={len(micro_indices)}",
+                    rank=rank,
+                )
                 micro_rows = []
                 for example_idx in micro_indices:
                     rows = buffer_df[buffer_df["example_idx"] == example_idx].sort_values("sample_idx")
@@ -483,6 +491,11 @@ def train_stage_from_buffer(
                     micro_df,
                     next(unwrap_model(model).parameters()).device,
                 )
+                debug_log(
+                    f"[block {block_idx}] step {step_id} micro prepared rows={len(micro_df)} seq_shape={tuple(sequences.shape)} max_prompt_len={max(prompt_lens)} reward_mean={float(rewards.mean().detach().cpu()):.4f}",
+                    rank=rank,
+                )
+                debug_log(f"[block {block_idx}] step {step_id} loss forward begin", rank=rank)
                 loss, logp_theta, logp_ref = vargrad_tb_loss(
                     model,
                     tokenizer,
@@ -495,8 +508,11 @@ def train_stage_from_buffer(
                     args.completions_per_prefix,
                     args.score_micro_batch_size,
                 )
+                debug_log(f"[block {block_idx}] step {step_id} loss forward end", rank=rank)
                 micro_sequences = len(micro_df)
+                debug_log(f"[block {block_idx}] step {step_id} backward begin", rank=rank)
                 (loss * (micro_sequences / total_sequences)).backward()
+                debug_log(f"[block {block_idx}] step {step_id} backward end", rank=rank)
 
                 loss_sum += float(loss.detach().cpu()) * micro_sequences
                 reward_sum += float(rewards.sum().detach().cpu())
@@ -535,7 +551,9 @@ def train_stage_from_buffer(
                             }
                         )
 
+            debug_log(f"[block {block_idx}] step {step_id} optimizer step begin", rank=rank)
             optimizer.step()
+            debug_log(f"[block {block_idx}] step {step_id} optimizer step end", rank=rank)
             global_step = step_id
             record = {
                 "step": global_step,
