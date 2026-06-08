@@ -24,7 +24,7 @@ def natural_key(text):
 def main():
     parser = argparse.ArgumentParser(description="Replay one dumped blockwise micro-batch against a saved checkpoint.")
     parser.add_argument("--checkpoint_dir", type=str, required=True)
-    parser.add_argument("--micro_batch_csv", type=str, action="append", required=True)
+    parser.add_argument("--micro_batch_csv", type=str, action="append", default=None)
     parser.add_argument("--micro_batch_glob", type=str, default=None)
     parser.add_argument("--max_micro_batches", type=int, default=0)
     parser.add_argument("--model", type=str, default=None, choices=sorted(MODEL_NAME_BY_KEY))
