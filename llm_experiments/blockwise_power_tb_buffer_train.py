@@ -303,6 +303,24 @@ def generate_stage_buffer_subprocess(block_idx, args, adapter_path):
     subprocess.run(command, cwd=Path(__file__).resolve().parent, env=env, check=True)
 
 
+def build_checkpoint_state(args, wandb_run, global_step, next_block_idx, current_block_idx=None, resume_epoch=None, resume_batch_start=None, resume_rank_order=None):
+    state = {
+        "next_block_idx": next_block_idx,
+        "global_step": global_step,
+        "wandb_id": wandb_run.id if wandb_run is not None else args.wandb_id,
+        "args": vars(args),
+    }
+    if current_block_idx is not None:
+        state["current_block_idx"] = current_block_idx
+    if resume_epoch is not None:
+        state["resume_epoch"] = resume_epoch
+    if resume_batch_start is not None:
+        state["resume_batch_start"] = resume_batch_start
+    if resume_rank_order is not None:
+        state["resume_rank_order"] = list(resume_rank_order)
+    return state
+
+
 def encode_buffer_group(tokenizer, rows, device):
     sequences = []
     prompt_lens = []
@@ -346,18 +364,32 @@ def train_stage_from_buffer(
     metrics,
     sample_records,
     wandb_run,
+    resume_block_state=None,
+    checkpoint_callback=None,
 ):
-    order = list(range(len(dataset)))
-    for epoch in range(args.epochs):
-        random.shuffle(order)
-        rank_order = order
+    default_order = list(range(len(dataset)))
+    resume_rank_order = None
+    start_epoch = 0
+    resume_batch_start = 0
+    if resume_block_state is not None and int(resume_block_state.get("current_block_idx", -1)) == block_idx:
+        resume_rank_order = resume_block_state.get("resume_rank_order")
+        start_epoch = int(resume_block_state.get("resume_epoch", 0))
+        resume_batch_start = int(resume_block_state.get("resume_batch_start", 0) or 0)
+
+    for epoch in range(start_epoch, args.epochs):
+        if epoch == start_epoch and resume_rank_order is not None:
+            rank_order = list(resume_rank_order)
+        else:
+            rank_order = list(default_order)
+            random.shuffle(rank_order)
         if world_size > 1:
             remainder = len(rank_order) % world_size
             if remainder:
                 rank_order.extend(rank_order[: world_size - remainder])
             rank_order = rank_order[rank::world_size]
+        epoch_batch_start = resume_batch_start if epoch == start_epoch and resume_rank_order is not None else 0
 
-        for start in tqdm(range(0, len(rank_order), args.batch_size), desc=f"block {block_idx} epoch {epoch}"):
+        for start in tqdm(range(epoch_batch_start, len(rank_order), args.batch_size), desc=f"block {block_idx} epoch {epoch}"):
             batch_indices = rank_order[start:start + args.batch_size]
             optimizer.zero_grad(set_to_none=True)
             step_id = global_step + 1
@@ -457,6 +489,14 @@ def train_stage_from_buffer(
             print(record, flush=True)
             if wandb_run is not None:
                 wandb_run.log(record, step=global_step)
+            if checkpoint_callback is not None and args.save_every_steps and global_step % args.save_every_steps == 0:
+                checkpoint_callback(
+                    current_block_idx=block_idx,
+                    global_step=global_step,
+                    resume_epoch=epoch,
+                    resume_batch_start=start + args.batch_size,
+                    resume_rank_order=rank_order,
+                )
     return global_step
 
 
@@ -484,6 +524,7 @@ def main():
     parser.add_argument("--torch_dtype", type=str, default="bfloat16", choices=["auto", "bfloat16", "float16", "float32"])
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--save_every_block", action="store_true")
+    parser.add_argument("--save_every_steps", type=int, default=0)
     parser.add_argument("--save_samples", action="store_true")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None)
     parser.add_argument("--use_wandb", action="store_true")
@@ -547,12 +588,19 @@ def main():
         start_block_idx = 1
         global_step = 0
         adapter_path = None
+        resume_block_state = None
         if args.resume_from_checkpoint:
             debug_log(f"reading resume state from {args.resume_from_checkpoint}", rank=rank)
             checkpoint_dir = Path(args.resume_from_checkpoint)
             adapter_path = checkpoint_dir / "adapter"
             resume_state = torch.load(checkpoint_dir / "training_state.pt", map_location="cpu", weights_only=False)["state"]
-            start_block_idx = int(resume_state.get("next_block_idx", 1))
+            resume_block_idx = resume_state.get("current_block_idx")
+            resume_batch_start = int(resume_state.get("resume_batch_start", 0) or 0)
+            if resume_block_idx is not None and resume_batch_start > 0:
+                start_block_idx = int(resume_block_idx)
+                resume_block_state = resume_state
+            else:
+                start_block_idx = int(resume_state.get("next_block_idx", 1))
             global_step = int(resume_state.get("global_step", 0))
             debug_log(
                 f"resume state ready next_block_idx={start_block_idx} global_step={global_step}",
@@ -634,6 +682,24 @@ def main():
                 load_checkpoint_state(args.resume_from_checkpoint, optimizer, distributed_device)
 
             debug_log(f"[block {block_idx}] starting training loop", rank=rank)
+
+            def save_mid_block_checkpoint(current_block_idx, global_step, resume_epoch, resume_batch_start, resume_rank_order):
+                checkpoint_state = build_checkpoint_state(
+                    args,
+                    wandb_run,
+                    global_step=global_step,
+                    next_block_idx=current_block_idx,
+                    current_block_idx=current_block_idx,
+                    resume_epoch=resume_epoch,
+                    resume_batch_start=resume_batch_start,
+                    resume_rank_order=resume_rank_order,
+                )
+                save_checkpoint(output_dir, model, tokenizer, optimizer, checkpoint_state, distributed=False)
+                log_point(
+                    f"[block {current_block_idx}] checkpoint_latest updated at step {global_step}",
+                    rank=rank,
+                )
+
             global_step = train_stage_from_buffer(
                 model,
                 tokenizer,
@@ -648,7 +714,10 @@ def main():
                 metrics,
                 sample_records,
                 wandb_run,
+                resume_block_state=resume_block_state if block_idx == start_block_idx else None,
+                checkpoint_callback=save_mid_block_checkpoint,
             )
+            resume_block_state = None
 
             if args.save_every_block:
                 block_dir = output_dir / f"block_{block_idx}"
@@ -674,12 +743,12 @@ def main():
                 if wandb_run is not None:
                     wandb_run.log(eval_metrics, step=global_step)
 
-            checkpoint_state = {
-                "next_block_idx": block_idx + 1,
-                "global_step": global_step,
-                "wandb_id": wandb_run.id if wandb_run is not None else args.wandb_id,
-                "args": vars(args),
-            }
+            checkpoint_state = build_checkpoint_state(
+                args,
+                wandb_run,
+                global_step=global_step,
+                next_block_idx=block_idx + 1,
+            )
             save_checkpoint(output_dir, model, tokenizer, optimizer, checkpoint_state, distributed=False)
             adapter_path = output_dir / "checkpoint_latest" / "adapter"
             log_point(f"[block {block_idx}] checkpoint_latest updated", rank=rank)

@@ -130,6 +130,8 @@ def build_train_command(args, block_idx, output_dir):
         command.append("--save_every_block")
     if args.score_micro_batch_size is not None:
         command.extend(["--score_micro_batch_size", str(args.score_micro_batch_size)])
+    if args.save_every_steps:
+        command.extend(["--save_every_steps", str(args.save_every_steps)])
     if args.use_wandb:
         command.append("--use_wandb")
     if args.wandb_project is not None:
@@ -252,6 +254,7 @@ def main():
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--save_samples", action="store_true")
     parser.add_argument("--save_every_block", action="store_true")
+    parser.add_argument("--save_every_steps", type=int, default=0)
     parser.add_argument("--eval_examples", type=int, default=None)
     parser.add_argument("--eval_max_new_tokens", type=int, default=3072)
     parser.add_argument("--eval_backend", type=str, default="vllm", choices=["hf", "vllm"])
