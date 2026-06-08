@@ -1,12 +1,14 @@
 import argparse
 import os
+import random
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import transformers
 
 from blockwise_power_tb_buffer_train import generate_stage_buffer
-from blockwise_power_tb_train import MODEL_NAME_BY_KEY, load_math_dataset, seed_everything
+from blockwise_power_tb_train import MODEL_NAME_BY_KEY, load_math_dataset
 
 
 def debug_log(output_dir, message):
@@ -16,6 +18,11 @@ def debug_log(output_dir, message):
     print(line, flush=True)
     with (debug_dir / "vllm_sampler.log").open("a", buffering=1) as handle:
         print(line, file=handle, flush=True)
+
+
+def seed_for_vllm(seed):
+    random.seed(seed)
+    np.random.seed(seed)
 
 
 def main():
@@ -42,7 +49,7 @@ def main():
     args = parser.parse_args()
 
     debug_log(args.output_dir, f"sampler start block_idx={args.block_idx} adapter_path={args.adapter_path} CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
-    seed_everything(args.seed)
+    seed_for_vllm(args.seed)
     model_name = MODEL_NAME_BY_KEY[args.model]
     debug_log(args.output_dir, f"loading dataset from {args.data_path}")
     dataset = load_math_dataset(args.data_path)[: args.max_examples]

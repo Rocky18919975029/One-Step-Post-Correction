@@ -366,6 +366,7 @@ def main():
 
     sampler_env = base_env.copy()
     sampler_env["CUDA_VISIBLE_DEVICES"] = args.sampler_gpus
+    sampler_env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     train_env = base_env.copy()
     train_env["CUDA_VISIBLE_DEVICES"] = args.gpu
