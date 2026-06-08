@@ -211,6 +211,8 @@ def build_train_command(args, block_idx, output_dir):
         command.extend(["--wandb_id", args.wandb_id])
     if args.wandb_resume is not None:
         command.extend(["--wandb_resume", args.wandb_resume])
+    if args.wandb_log_every is not None:
+        command.extend(["--wandb_log_every", str(args.wandb_log_every)])
     ckpt_dir = checkpoint_dir(output_dir)
     if ckpt_dir.exists():
         command.extend(["--resume_from_checkpoint", str(ckpt_dir)])
@@ -343,6 +345,7 @@ def main():
     parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument("--wandb_id", type=str, default=None)
     parser.add_argument("--wandb_resume", type=str, default="allow")
+    parser.add_argument("--wandb_log_every", type=int, default=5)
     args = parser.parse_args()
 
     apply_smoke_defaults(args)

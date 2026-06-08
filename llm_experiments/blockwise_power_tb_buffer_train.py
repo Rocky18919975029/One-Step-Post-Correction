@@ -86,6 +86,10 @@ def log_point(label, rank=0):
     debug_log(f"{label}", rank=rank)
 
 
+def should_log_wandb_step(args, step):
+    return args.wandb_log_every <= 1 or step % args.wandb_log_every == 0
+
+
 def load_vllm(model_name, args, adapter_path=None):
     try:
         from vllm import LLM, SamplingParams
@@ -543,7 +547,7 @@ def train_stage_from_buffer(
             }
             metrics.append(record)
             print(record, flush=True)
-            if wandb_run is not None:
+            if wandb_run is not None and should_log_wandb_step(args, global_step):
                 wandb_run.log(record, step=global_step)
             if checkpoint_callback is not None and args.save_every_steps and global_step % args.save_every_steps == 0:
                 checkpoint_callback(
@@ -590,6 +594,7 @@ def main():
     parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument("--wandb_id", type=str, default=None)
     parser.add_argument("--wandb_resume", type=str, default="allow")
+    parser.add_argument("--wandb_log_every", type=int, default=5)
     parser.add_argument("--eval_every_block", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--eval_backend", type=str, default="hf", choices=["hf", "vllm"])
