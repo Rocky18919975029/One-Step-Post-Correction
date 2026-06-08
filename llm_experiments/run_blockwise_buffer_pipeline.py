@@ -35,7 +35,15 @@ def run_step(step_idx, total_steps, title, command, env):
     subprocess.run(command, cwd=SCRIPT_DIR, env=env, check=True)
 
 
+def parse_gpu_list(gpu_spec):
+    return [part.strip() for part in str(gpu_spec).split(",") if part.strip()]
+
+
 def build_sampler_command(args, block_idx, output_dir):
+    sampler_tp_size = args.vllm_tensor_parallel_size
+    sampler_gpu_count = len(parse_gpu_list(args.sampler_gpus))
+    if sampler_gpu_count > 1 and sampler_tp_size == 1:
+        sampler_tp_size = sampler_gpu_count
     command = [
         sys.executable,
         "blockwise_vllm_sample_buffer.py",
@@ -64,7 +72,7 @@ def build_sampler_command(args, block_idx, output_dir):
         "--vllm_dtype",
         args.vllm_dtype,
         "--vllm_tensor_parallel_size",
-        str(args.vllm_tensor_parallel_size),
+        str(sampler_tp_size),
         "--vllm_gpu_memory_utilization",
         str(args.vllm_gpu_memory_utilization),
         "--vllm_max_model_len",
@@ -234,6 +242,7 @@ def main():
         description="Run the maintained single-GPU blockwise buffer pipeline with visible per-step progress."
     )
     parser.add_argument("--gpu", type=str, default="0")
+    parser.add_argument("--sampler_gpus", type=str, default=None)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--output_dir", type=str, default="results/blockwise_buffer_pipeline")
     parser.add_argument("--data_path", type=str, default="../data/train.parquet")
@@ -288,10 +297,18 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = args.gpu
-    env["PYTHONUNBUFFERED"] = "1"
-    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    if args.sampler_gpus is None:
+        args.sampler_gpus = args.gpu
+
+    base_env = os.environ.copy()
+    base_env["PYTHONUNBUFFERED"] = "1"
+    base_env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+    sampler_env = base_env.copy()
+    sampler_env["CUDA_VISIBLE_DEVICES"] = args.sampler_gpus
+
+    train_env = base_env.copy()
+    train_env["CUDA_VISIBLE_DEVICES"] = args.gpu
 
     start_block = read_next_block_idx(output_dir)
     if start_block > args.num_blocks:
@@ -300,7 +317,7 @@ def main():
             flush=True,
         )
         total_steps = 1
-        run_step(1, total_steps, "Evaluating latest checkpoint", build_eval_command(args, output_dir), env)
+        run_step(1, total_steps, "Evaluating latest checkpoint", build_eval_command(args, output_dir), train_env)
         return
 
     total_steps = (args.num_blocks - start_block + 1) * 2 + 1
@@ -312,7 +329,7 @@ def main():
             total_steps,
             f"Sampling block {block_idx} with vLLM",
             build_sampler_command(args, block_idx, output_dir),
-            env,
+            sampler_env,
         )
         step_idx += 1
 
@@ -321,7 +338,7 @@ def main():
             total_steps,
             f"Training through block {block_idx}",
             build_train_command(args, block_idx, output_dir),
-            env,
+            train_env,
         )
         step_idx += 1
 
@@ -330,7 +347,7 @@ def main():
         total_steps,
         "Evaluating latest checkpoint",
         build_eval_command(args, output_dir),
-        env,
+        train_env,
     )
 
 
