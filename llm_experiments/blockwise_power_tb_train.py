@@ -72,7 +72,7 @@ def parse_torch_dtype(dtype):
     raise ValueError(f"Unsupported torch dtype: {dtype}")
 
 
-def load_lora_model(model_name, torch_dtype, device=None, adapter_path=None):
+def load_lora_model(model_name, torch_dtype, device=None, adapter_path=None, attn_implementation=None):
     try:
         from peft import LoraConfig, TaskType, get_peft_model
     except ImportError as exc:
@@ -87,10 +87,16 @@ def load_lora_model(model_name, torch_dtype, device=None, adapter_path=None):
         else:
             device = torch.device("cpu")
 
+    model_kwargs = {
+        "torch_dtype": parse_torch_dtype(torch_dtype),
+        "trust_remote_code": True,
+    }
+    if attn_implementation is not None:
+        model_kwargs["attn_implementation"] = attn_implementation
+
     base_model = transformers.AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=parse_torch_dtype(torch_dtype),
-        trust_remote_code=True,
+        **model_kwargs,
     ).to(device)
     config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,

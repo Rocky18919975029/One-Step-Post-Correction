@@ -92,6 +92,23 @@ def should_log_wandb_step(args, step):
     return args.wandb_log_every == 1 or step % args.wandb_log_every == 0
 
 
+def dump_micro_batch_debug(output_dir, block_idx, step_id, micro_start, micro_indices, micro_df, prompt_lens, sequences):
+    debug_dir = Path(output_dir) / "debug_logs" / "micro_batches"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"block{block_idx}_step{step_id}_micro{micro_start}"
+    micro_df.to_csv(debug_dir / f"{stem}.csv", index=False)
+    meta = {
+        "block_idx": block_idx,
+        "step": step_id,
+        "micro_start": micro_start,
+        "example_indices": [int(idx) for idx in micro_indices],
+        "rows": int(len(micro_df)),
+        "seq_shape": tuple(int(x) for x in sequences.shape),
+        "prompt_lens": [int(x) for x in prompt_lens],
+    }
+    torch.save(meta, debug_dir / f"{stem}.pt")
+
+
 def load_vllm(model_name, args, adapter_path=None):
     try:
         from vllm import LLM, SamplingParams
@@ -491,6 +508,16 @@ def train_stage_from_buffer(
                     micro_df,
                     next(unwrap_model(model).parameters()).device,
                 )
+                dump_micro_batch_debug(
+                    args.output_dir,
+                    block_idx,
+                    step_id,
+                    micro_start,
+                    micro_indices,
+                    micro_df,
+                    prompt_lens,
+                    sequences,
+                )
                 debug_log(
                     f"[block {block_idx}] step {step_id} micro prepared rows={len(micro_df)} seq_shape={tuple(sequences.shape)} max_prompt_len={max(prompt_lens)} reward_mean={float(rewards.mean().detach().cpu()):.4f}",
                     rank=rank,
@@ -605,6 +632,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--torch_dtype", type=str, default="bfloat16", choices=["auto", "bfloat16", "float16", "float32"])
+    parser.add_argument("--attn_implementation", type=str, default=None, choices=["eager", "sdpa", "flash_attention_2"])
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--save_every_block", action="store_true")
     parser.add_argument("--save_every_steps", type=int, default=0)
@@ -717,7 +745,13 @@ def main():
                     adapter_path=adapter_path,
                 )
             else:
-                model = load_lora_model(model_name, args.torch_dtype, distributed_device, adapter_path)
+                model = load_lora_model(
+                    model_name,
+                    args.torch_dtype,
+                    distributed_device,
+                    adapter_path,
+                    attn_implementation=args.attn_implementation,
+                )
                 eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
                 del model
                 clear_cuda()
@@ -752,7 +786,13 @@ def main():
             debug_log(f"[block {block_idx}] loaded {len(buffer_df)} buffered samples", rank=rank)
 
             debug_log(f"[block {block_idx}] loading train model", rank=rank)
-            model = load_lora_model(model_name, args.torch_dtype, distributed_device, stage_adapter_path)
+            model = load_lora_model(
+                model_name,
+                args.torch_dtype,
+                distributed_device,
+                stage_adapter_path,
+                attn_implementation=args.attn_implementation,
+            )
             if args.gradient_checkpointing:
                 enable_gradient_checkpointing(model)
             model.train()

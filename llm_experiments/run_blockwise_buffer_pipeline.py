@@ -183,6 +183,8 @@ def build_train_command(args, block_idx, output_dir):
         str(args.lr),
         "--seed",
         str(args.seed),
+        "--attn_implementation",
+        args.attn_implementation,
         "--output_dir",
         str(output_dir),
         "--skip_buffer_sampling",
@@ -322,6 +324,7 @@ def main():
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--attn_implementation", type=str, default="sdpa", choices=["eager", "sdpa", "flash_attention_2"])
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--save_samples", action="store_true")
     parser.add_argument("--save_every_block", action="store_true")
