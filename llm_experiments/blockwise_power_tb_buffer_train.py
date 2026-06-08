@@ -127,6 +127,10 @@ def vllm_generate_texts(llm, sampling_params_cls, lora_request, prompts, args, m
     return generated
 
 
+def partial_completion_token_limit(block_idx, args):
+    return min(block_idx * args.block_size, args.max_completion_tokens)
+
+
 def evaluate_model_with_vllm(model_name, tokenizer, eval_rows, args, adapter_path=None):
     if not eval_rows:
         return {}
@@ -163,64 +167,100 @@ def evaluate_model_with_vllm(model_name, tokenizer, eval_rows, args, adapter_pat
     }
 
 
-def build_vllm_prefixes(llm, sampling_params_cls, lora_request, prompts, block_idx, args):
-    if block_idx == 1:
-        return prompts
-
-    prefix_new_tokens = (block_idx - 1) * args.block_size
-    prefix_outputs = vllm_generate_texts(
-        llm,
-        sampling_params_cls,
-        lora_request,
-        prompts,
-        args,
-        max_tokens=prefix_new_tokens,
-        n=1,
-        desc=f"block {block_idx} prefix generation",
-    )
-    return [prompt + choices[0] for prompt, choices in zip(prompts, prefix_outputs)]
-
-
 def generate_stage_buffer(model_name, tokenizer, dataset, block_idx, args, adapter_path, output_dir):
     prompts = [format_prompt(row["prompt"], args.model, tokenizer, cot=True) for row in dataset]
+    stage_token_limit = partial_completion_token_limit(block_idx, args)
+    future_completions_per_partial = (
+        args.future_completions_per_partial
+        if args.future_completions_per_partial is not None
+        else args.completions_per_prefix
+    )
+    future_token_budget = max(args.max_completion_tokens - stage_token_limit, 0)
     llm, sampling_params_cls, lora_request = load_vllm(model_name, args, adapter_path)
     try:
-        prefixes = build_vllm_prefixes(llm, sampling_params_cls, lora_request, prompts, block_idx, args)
-        completion_outputs = vllm_generate_texts(
+        partial_completion_outputs = vllm_generate_texts(
             llm,
             sampling_params_cls,
             lora_request,
-            prefixes,
+            prompts,
             args,
-            max_tokens=args.max_completion_tokens,
+            max_tokens=stage_token_limit,
             n=args.completions_per_prefix,
-            desc=f"block {block_idx} completion generation",
+            desc=f"block {block_idx} partial completion generation",
         )
+
+        future_prompts = []
+        future_metadata = []
+        for example_idx, (row, prompt_text, partials) in enumerate(zip(dataset, prompts, partial_completion_outputs)):
+            for sample_idx, partial_completion in enumerate(partials):
+                partial_prefix = prompt_text + partial_completion
+                partial_token_len = len(tokenizer.encode(partial_completion, add_special_tokens=False))
+                future_prompts.append(partial_prefix)
+                future_metadata.append(
+                    {
+                        "example_idx": example_idx,
+                        "sample_idx": sample_idx,
+                        "question": row["prompt"],
+                        "correct_answer": row["answer"],
+                        "prefix_text": prompt_text,
+                        "prefix_token_len": len(tokenizer.encode(prompt_text)),
+                        "completion": partial_completion,
+                        "completion_token_len": partial_token_len,
+                    }
+                )
+
+        future_outputs = []
+        batch_size = max(1, args.vllm_batch_size)
+        for start in tqdm(range(0, len(future_prompts), batch_size), desc=f"block {block_idx} future reward estimation"):
+            batch_prompts = future_prompts[start:start + batch_size]
+            if future_token_budget > 0:
+                outputs = vllm_generate_texts(
+                    llm,
+                    sampling_params_cls,
+                    lora_request,
+                    batch_prompts,
+                    args,
+                    max_tokens=future_token_budget,
+                    n=future_completions_per_partial,
+                    desc=f"block {block_idx} future reward generation",
+                )
+            else:
+                outputs = [[ "" for _ in range(future_completions_per_partial)] for _ in batch_prompts]
+            future_outputs.extend(outputs)
     finally:
         del llm
         clear_cuda()
 
     records = []
-    for example_idx, (row, prefix_text, completions) in enumerate(zip(dataset, prefixes, completion_outputs)):
-        prefix_token_len = len(tokenizer.encode(prefix_text))
-        for sample_idx, completion in enumerate(completions):
-            reward, parsed = score_completion(completion, row["answer"])
-            records.append(
-                {
-                    "block_idx": block_idx,
-                    "example_idx": example_idx,
-                    "sample_idx": sample_idx,
-                    "question": row["prompt"],
-                    "correct_answer": row["answer"],
-                    "prefix_token_len": prefix_token_len,
-                    "prefix_text": prefix_text,
-                    "completion_token_len": len(tokenizer.encode(completion, add_special_tokens=False)),
-                    "completion": completion,
-                    "parsed_answer": parsed,
-                    "has_boxed_answer": parsed is not None,
-                    "reward": reward,
-                }
-            )
+    for meta, futures in zip(future_metadata, future_outputs):
+        future_rewards = []
+        first_successful_parsed = None
+        for future in futures:
+            full_completion = meta["completion"] + future
+            future_reward, future_parsed = score_completion(full_completion, meta["correct_answer"])
+            future_rewards.append(future_reward)
+            if future_reward > 0 and first_successful_parsed is None:
+                first_successful_parsed = future_parsed
+
+        reward = 1.0 if any(r > 0 for r in future_rewards) else 0.0
+        records.append(
+            {
+                "block_idx": block_idx,
+                "example_idx": meta["example_idx"],
+                "sample_idx": meta["sample_idx"],
+                "question": meta["question"],
+                "correct_answer": meta["correct_answer"],
+                "prefix_token_len": meta["prefix_token_len"],
+                "prefix_text": meta["prefix_text"],
+                "completion_token_len": meta["completion_token_len"],
+                "completion": meta["completion"],
+                "parsed_answer": first_successful_parsed,
+                "has_boxed_answer": first_successful_parsed is not None,
+                "reward": reward,
+                "future_reward_mean": float(np.mean(future_rewards)) if future_rewards else 0.0,
+                "future_any_correct": bool(reward > 0),
+            }
+        )
 
     buffer_dir = output_dir / "buffers"
     buffer_dir.mkdir(parents=True, exist_ok=True)
@@ -514,6 +554,7 @@ def main():
     parser.add_argument("--block_size", type=int, default=192)
     parser.add_argument("--num_blocks", type=int, default=3)
     parser.add_argument("--completions_per_prefix", type=int, default=4)
+    parser.add_argument("--future_completions_per_partial", type=int, default=None)
     parser.add_argument("--max_new_tokens", type=int, default=3072)
     parser.add_argument("--max_completion_tokens", type=int, default=3072)
     parser.add_argument("--temperature", type=float, default=0.25)

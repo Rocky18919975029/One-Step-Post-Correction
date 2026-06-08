@@ -53,6 +53,8 @@ def build_sampler_command(args, block_idx, output_dir):
         str(args.block_size),
         "--completions_per_prefix",
         str(args.completions_per_prefix),
+        "--future_completions_per_partial",
+        str(args.future_completions_per_partial if args.future_completions_per_partial is not None else args.completions_per_prefix),
         "--max_completion_tokens",
         str(args.max_completion_tokens),
         "--temperature",
@@ -245,6 +247,7 @@ def main():
     parser.add_argument("--num_blocks", type=int, default=None)
     parser.add_argument("--block_size", type=int, default=192)
     parser.add_argument("--completions_per_prefix", type=int, default=4)
+    parser.add_argument("--future_completions_per_partial", type=int, default=None)
     parser.add_argument("--max_completion_tokens", type=int, default=3072)
     parser.add_argument("--temperature", type=float, default=0.25)
     parser.add_argument("--alpha", type=float, default=4.0)

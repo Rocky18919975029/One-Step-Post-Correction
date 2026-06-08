@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--max_examples", type=int, default=32)
     parser.add_argument("--block_size", type=int, default=192)
     parser.add_argument("--completions_per_prefix", type=int, default=4)
+    parser.add_argument("--future_completions_per_partial", type=int, default=None)
     parser.add_argument("--max_completion_tokens", type=int, default=3072)
     parser.add_argument("--temperature", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=0)
