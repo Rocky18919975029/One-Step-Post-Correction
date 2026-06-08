@@ -1,21 +1,211 @@
 # One-Step-Post-Correction
 
+This repository implements the current block-wise training algorithm for math reasoning with offline buffers, LoRA fine-tuning, and vLLM-based sampling/evaluation.
 
-### [Paper](https://arxiv.org/abs/2510.14901) | [Project Page](https://aakaran.github.io/reasoning_with_sampling/)
+The README is intentionally written for the *current* manuscript and code only. It does not preserve older training routes, deprecated launchers, or historical variants.
 
-[![rws](teaser.png)](teaser.png)
+## What This Repository Does
 
+We train a model to improve math reasoning by optimizing **partial completions** stage by stage.
 
-This repo contains the PyTorch implementation for One-Step-Post-Correction, adapted from Reasoning with Sampling.
-> [**Reasoning with Sampling: Your Base Model is Smarter Than You Think**](https://arxiv.org/abs/2510.14901)<br>
-> [Aayush Karan](https://aakaran.github.io/), [Yilun Du](https://yilundu.github.io/)
-> <br>Harvard<br>
+For each prompt `x`, we do not train directly on full sampled completions. Instead, we split the reasoning process into `num_blocks` stages. At stage `k`, we define a token budget
 
+```text
+l_k = min(k * block_size, max_completion_tokens)
+```
 
+and train on partial completions `y_{<= l_k}` only.
+
+The key idea is:
+
+1. Sample several partial completions up to stage `k`.
+2. For each partial completion, sample several future continuations to the end.
+3. Give the partial completion reward `1` if **any** sampled future reaches a correct final answer, otherwise `0`.
+4. Train the model so that the distribution over partial completions better matches this stage-wise target.
+
+This is an **offline-buffered** implementation:
+
+- sampling and reward estimation happen first
+- stage buffers are written to disk as CSV files
+- training then consumes those saved buffers
+
+The implementation is single-GPU for training, and can shard sampling across multiple GPUs.
+
+## Current Algorithm
+
+### Stage semantics
+
+For stage `k`:
+
+- training object: partial completion `y_{<= l_k}`
+- reward object: whether this partial completion can be extended to a correct final answer
+- reward aggregation: **OR / any-hit**, not mean reward
+
+That means the code optimizes:
+
+- `log pi_theta(y_{<= l_k} | x)`
+- `log pi_ref(y_{<= l_k} | x)`
+- a binary stage reward estimated from future rollouts
+
+It does **not** optimize log-probability on the full completion at each stage.
+
+### Buffer semantics
+
+Each row in `buffers/block_k.csv` represents one stage-`k` training sample:
+
+- a prompt `x`
+- one sampled partial completion `y_{<= l_k}`
+- a binary reward for that partial completion
+
+The reward is computed by sampling `future_completions_per_partial` futures from `x + y_{<= l_k}` and setting:
+
+```text
+reward = 1  if any future ends correct
+reward = 0  otherwise
+```
+
+The buffer also stores diagnostic fields such as:
+
+- `future_reward_mean`
+- `future_any_correct`
+- `parsed_answer`
+- `has_boxed_answer`
+
+Only `reward` is used for training.
+
+## Code Structure
+
+The active implementation lives in [`llm_experiments`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments).
+
+The most important files are:
+
+- [`llm_experiments/run_blockwise_buffer_pipeline.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/run_blockwise_buffer_pipeline.py)
+  Unified scheduler for the maintained workflow. It handles stage-by-stage sampling, training, resume, buffer reuse, and final evaluation.
+
+- [`llm_experiments/blockwise_vllm_sample_buffer.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_vllm_sample_buffer.py)
+  vLLM sampling entrypoint. When multiple sampler GPUs are visible, it shards the dataset into multiple single-GPU workers and merges the resulting CSV shards automatically.
+
+- [`llm_experiments/blockwise_power_tb_buffer_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_power_tb_buffer_train.py)
+  Main training script for offline stage buffers. It also contains:
+  - stage buffer generation logic
+  - vLLM eval-only path
+  - resume / checkpoint logic
+
+- [`llm_experiments/blockwise_power_tb_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_power_tb_train.py)
+  Shared lower-level utilities:
+  - LoRA model loading
+  - checkpoint save/load
+  - trajectory-balance-style loss
+  - reward parsing and grading helpers
+
+- [`llm_experiments/make_mini_train_parquet.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/make_mini_train_parquet.py)
+  Helper for constructing a reproducible mini training set from a larger parquet file.
+
+- [`llm_experiments/inspect_blockwise_samples.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/inspect_blockwise_samples.py)
+  Small inspection helper for looking through generated samples.
+
+Older scripts that are not part of the current maintained workflow live under [`llm_experiments/legacy`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/legacy).
+
+## End-to-End Workflow
+
+The maintained workflow is:
+
+1. Build or load a training dataset.
+2. For block `k`, sample a partial-completion buffer with vLLM.
+3. Train from that buffer on a single GPU.
+4. Save `checkpoint_latest`.
+5. Repeat for the next block.
+6. Run final evaluation from the latest checkpoint with vLLM.
+
+The unified pipeline script does this automatically.
+
+### Sampling
+
+Sampling for block `k` works as follows:
+
+1. Build prompts with the repo's existing math prompt formatter.
+2. Sample `completions_per_prefix` partial completions up to `l_k`.
+3. For each partial completion, sample `future_completions_per_partial` futures.
+4. Score each full completion against the ground-truth answer.
+5. Write one CSV row per partial completion.
+
+When multiple sampler GPUs are provided, the dataset is split by example index and processed by independent single-GPU workers. The workers write temporary shard CSVs, which are then merged into one final `block_k.csv`.
+
+### Training
+
+Training from a buffer works as follows:
+
+1. Read `buffers/block_k.csv`.
+2. Group rows by `example_idx`.
+3. For each training example, take `completions_per_prefix` partial completions.
+4. Encode `prompt + partial_completion`.
+5. Compute the loss on the partial completion tokens only.
+6. Update the LoRA adapter.
+
+The current reference model is the base model with the LoRA adapter disabled.
+
+### Evaluation
+
+Evaluation uses the latest adapter checkpoint and runs full completion generation with vLLM on the evaluation set. The current maintained eval path is the `--eval_only --eval_backend vllm` route implemented in [`llm_experiments/blockwise_power_tb_buffer_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_power_tb_buffer_train.py).
+
+## Data And Outputs
+
+### Training data
+
+The training parquet is expected to contain a math question and ground-truth answer. The loader currently reads:
+
+- `question`
+- `gt_answer` or `answer`
+
+and converts them into the internal format:
+
+```text
+{"prompt": ..., "answer": ...}
+```
+
+### Main output directory layout
+
+A typical run directory looks like this:
+
+```text
+results/<run_name>/
+  buffers/
+    block_1.csv
+    block_2.csv
+    ...
+  checkpoint_latest/
+    adapter/
+    optimizer.pt
+    training_state.pt
+    ...
+  metrics.csv
+  samples.csv
+  eval_metrics.csv
+  final/
+  debug_logs/
+```
+
+### Buffer columns
+
+The most important columns in `block_k.csv` are:
+
+- `block_idx`
+- `example_idx`
+- `sample_idx`
+- `prefix_text`
+- `completion`
+- `completion_token_len`
+- `reward`
+- `future_reward_mean`
+- `future_any_correct`
+
+Interpretation:
+
+- `prefix_text` is the prompt
+- `completion` is the stage-limited partial completion
+- `reward` is the binary OR reward used for training
 
 ## Setup
-
-Run the following script to setup environment.
 
 ```bash
 git clone https://github.com/Rocky18919975029/One-Step-Post-Correction.git
@@ -24,258 +214,190 @@ conda env create -f environment.yml
 conda activate psamp
 ```
 
-
-## Sampling
-The maintained path in this repo is the block-wise single-process workflow documented below. Older one-shot sampling, evaluation, pass@k, and Slurm helper scripts have been moved to [`llm_experiments/legacy/`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/legacy) so they do not clutter the main training surface.
-
-To run power sampling on MATH500 with 8 seeds and the eval set split across 5 shards:
-```bash
-sbatch llm_experiments/legacy/scripts/power_samp_math.sh
-```
-The output is several .csv files (based on the shard and seed number) that store the response outputs, correct answers, original prompts, etc. 
-
-The maintained path in this repo is now single-process execution. If you want to shard or queue jobs across several GPUs, launch separate single-GPU processes externally rather than using the removed in-repo DDP launchers.
-
-## Block-wise Power Distribution Matching
-
-To train the block-wise reward-augmented power distribution objective from the manuscript, first install LoRA support if it is not already present:
+Some workflows also require:
 
 ```bash
-pip install peft
+pip install peft safetensors
 ```
 
-Then run a small smoke test:
+If you want wandb logging:
+
+```bash
+pip install wandb
+```
+
+## Recommended Commands
+
+### Create a 500-example mini training set
 
 ```bash
 cd llm_experiments
-CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_train.py \
-  --model qwen_math \
-  --max_examples 1 \
-  --num_blocks 1 \
-  --completions_per_prefix 2 \
-  --max_completion_tokens 64 \
-  --save_samples
+python make_mini_train_parquet.py \
+  --input ../data/train.parquet \
+  --output ../data/mini_train.parquet \
+  --count 500 \
+  --seed 0
 ```
 
-The script uses the existing MATH prompt format, boxed-answer parser, and math grader as the answer-correctness reward. It implements the manuscript's arithmetic-mean VarGrad estimate:
+### Full maintained pipeline
 
-```text
-log Z_hat = mean_m(alpha log pi_ref - log pi_theta + reward / beta)
-```
-
-and the trajectory balance loss:
-
-```text
-(stopgrad(log Z_hat) + log pi_theta - alpha log pi_ref - reward / beta)^2
-```
-
-The default block hyperparameters follow the sampling code: ```max_new_tokens=3072```, ```num_blocks=16```, and ```block_size=192```.
-
-Training proceeds stage-by-stage: block ```k``` is trained for all requested epochs before moving to block ```k+1```, and the updated model is used to generate prefixes for the next stage.
-
-When ```--save_samples``` is enabled, sampled completions are written to ```samples.csv``` with block index, example index, prefix text, completion text, parsed answer, reward, and reference/trainable log probabilities.
-
-For a small multi-block debug run:
+This is the main entrypoint.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_train.py \
-  --model qwen_math \
-  --max_examples 2 \
-  --num_blocks 3 \
-  --completions_per_prefix 2 \
-  --max_completion_tokens 512 \
-  --save_samples \
-  --output_dir results/blockwise_tb_debug
-```
+cd llm_experiments
 
-Then inspect every block's inputs, outputs, rewards, and log probabilities:
-
-```bash
-python inspect_blockwise_samples.py results/blockwise_tb_debug --show_examples 2
-```
-
-Optional experiment tracking, checkpoint resume, and block-end evaluation all work in the maintained single-process path:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_train.py \
-  --model qwen_math \
+python run_blockwise_buffer_pipeline.py \
+  --gpu 0 \
+  --sampler_gpus 0,1,2,3 \
+  --output_dir results/blockwise_buffer_mini500_qwen_seed0 \
+  --data_path ../data/mini_train.parquet \
   --eval_data_path data/MATH500.json \
-  --max_examples 32 \
+  --model qwen \
+  --max_examples 500 \
   --batch_size 4 \
-  --micro_batch_size 1 \
+  --micro_batch_size 2 \
   --score_micro_batch_size 1 \
-  --gradient_checkpointing \
+  --epochs 1 \
   --num_blocks 16 \
-  --completions_per_prefix 2 \
+  --block_size 192 \
+  --completions_per_prefix 4 \
+  --future_completions_per_partial 4 \
   --max_completion_tokens 3072 \
+  --temperature 0.25 \
+  --alpha 4.0 \
+  --beta 1.0 \
+  --lr 1e-5 \
+  --seed 0 \
+  --gradient_checkpointing \
   --save_samples \
   --save_every_block \
-  --eval_every_block \
-  --eval_examples 32 \
+  --save_every_steps 5 \
+  --eval_backend vllm \
+  --eval_examples 100 \
   --eval_max_new_tokens 3072 \
+  --vllm_dtype bfloat16 \
+  --vllm_gpu_memory_utilization 0.9 \
+  --vllm_max_model_len 4096 \
+  --vllm_batch_size 32 \
+  --vllm_enforce_eager \
+  --debug_dump_timeout_seconds 60 \
   --use_wandb \
   --wandb_project one-step-post-correction \
-  --wandb_run_name blockwise-32x16 \
-  --output_dir results/blockwise_tb_single_32x16
+  --wandb_run_name mini500-qwen-seed0
 ```
 
-The latest stage-boundary checkpoint is stored in ```checkpoint_latest```. Resume with:
+This configuration means:
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_train.py \
-  --resume_from_checkpoint results/blockwise_tb_single_32x16/checkpoint_latest \
-  --model qwen_math \
-  --eval_data_path data/MATH500.json \
-  --max_examples 32 \
-  --batch_size 4 \
-  --micro_batch_size 1 \
-  --score_micro_batch_size 1 \
-  --gradient_checkpointing \
-  --num_blocks 16 \
-  --completions_per_prefix 2 \
-  --max_completion_tokens 3072 \
-  --save_samples \
-  --save_every_block \
-  --eval_every_block \
-  --eval_examples 32 \
-  --eval_max_new_tokens 3072 \
-  --use_wandb \
-  --wandb_resume allow \
-  --output_dir results/blockwise_tb_single_32x16
-```
+- sampling uses up to 4 GPUs, sharded by example
+- training stays on a single GPU
+- stage buffers are reused on resume if they are complete
+- final evaluation runs from the latest checkpoint
 
-If the checkpoint has a wandb run id, the resumed run continues logging to the same wandb run. Checkpoints are uploaded as wandb artifacts only when ```--wandb_log_checkpoints``` is set.
-
-Synchronous buffer training now follows a single-GPU, stage-by-stage workflow:
-
-1. Sample a block buffer with vLLM.
-2. Train from that saved buffer with ```blockwise_power_tb_buffer_train.py```.
-3. Repeat for the next block using ```checkpoint_latest/adapter```.
-
-For a maintained end-to-end pipeline run with one unified scheduler and visible per-step progress bars:
+### Small smoke test
 
 ```bash
 cd llm_experiments
 python run_blockwise_buffer_pipeline.py --smoke --output_dir results/blockwise_buffer_single_smoke
 ```
 
-Sample block 1:
+## Resume Semantics
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python blockwise_vllm_sample_buffer.py \
-  --data_path ../data/train.parquet \
-  --output_dir results/blockwise_buffer_small_qwen_seed0 \
-  --model qwen \
-  --block_idx 1 \
-  --max_examples 32 \
-  --block_size 192 \
-  --completions_per_prefix 4 \
-  --max_completion_tokens 3072 \
-  --temperature 0.25 \
-  --seed 0 \
-  --vllm_batch_size 8 \
-  --vllm_enforce_eager
-```
+Resume is built around `checkpoint_latest`.
 
-Train from the sampled buffer:
+The pipeline checks `checkpoint_latest/training_state.pt` to decide the next block. It also checks whether the current block buffer is already complete. If the buffer exists and has the expected number of rows and samples, the pipeline skips that block's sampling step and goes straight to training.
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_buffer_train.py \
-  --data_path ../data/train.parquet \
-  --eval_data_path data/MATH500.json \
-  --model qwen \
-  --max_examples 32 \
-  --batch_size 4 \
-  --micro_batch_size 1 \
-  --gradient_checkpointing \
-  --epochs 1 \
-  --num_blocks 1 \
-  --block_size 192 \
-  --completions_per_prefix 4 \
-  --max_completion_tokens 3072 \
-  --temperature 0.25 \
-  --alpha 4.0 \
-  --beta 1.0 \
-  --lr 1e-5 \
-  --seed 0 \
-  --save_samples \
-  --save_every_block \
-  --output_dir results/blockwise_buffer_small_qwen_seed0 \
-  --skip_buffer_sampling
-```
+Mid-block resume is also supported. When `save_every_steps > 0`, the trainer writes:
 
-Resume the next block from ```checkpoint_latest``` after sampling ```block_2.csv```:
+- current block
+- current epoch
+- current batch start
+- shuffled example order
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_buffer_train.py \
-  --data_path ../data/train.parquet \
-  --eval_data_path data/MATH500.json \
-  --model qwen \
-  --max_examples 32 \
-  --batch_size 4 \
-  --micro_batch_size 1 \
-  --gradient_checkpointing \
-  --epochs 1 \
-  --num_blocks 2 \
-  --block_size 192 \
-  --completions_per_prefix 4 \
-  --max_completion_tokens 3072 \
-  --temperature 0.25 \
-  --alpha 4.0 \
-  --beta 1.0 \
-  --lr 1e-5 \
-  --seed 0 \
-  --save_samples \
-  --save_every_block \
-  --output_dir results/blockwise_buffer_small_qwen_seed0 \
-  --skip_buffer_sampling \
-  --resume_from_checkpoint results/blockwise_buffer_small_qwen_seed0/checkpoint_latest
-```
+so training can restart from inside a block rather than repeating the whole block.
 
-For stable checkpoint evaluation, use the eval-only vLLM backend:
+## Key Parameters
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python blockwise_power_tb_buffer_train.py \
-  --data_path ../data/train.parquet \
-  --eval_data_path data/MATH500.json \
-  --model qwen \
-  --eval_only \
-  --eval_backend vllm \
-  --eval_every_block \
-  --eval_examples 100 \
-  --eval_max_new_tokens 3072 \
-  --vllm_batch_size 2 \
-  --vllm_enforce_eager \
-  --output_dir results/blockwise_buffer_small_qwen_seed0 \
-  --resume_from_checkpoint results/blockwise_buffer_small_qwen_seed0/checkpoint_latest
-```
+### Stage structure
 
-By default, the trainer scores multiple completions for each prompt in parallel. If this exceeds
-memory, add ```--score_micro_batch_size 1``` to score completions one at a time.
+- `num_blocks`: number of stages
+- `block_size`: tokens added per stage
+- `max_completion_tokens`: full completion budget
 
-## Evaluation
-The maintained evaluation path for block-wise buffer checkpoints is the `--eval_only --eval_backend vllm` flow shown above.
+### Sampling
 
-Older single-shot grading and pass@k utilities are archived under [`llm_experiments/legacy/`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/legacy).
+- `completions_per_prefix`: number of partial completions sampled per prompt per stage
+- `future_completions_per_partial`: number of future rollouts used to estimate the binary stage reward
+- `vllm_batch_size`: vLLM prompt batch size during sampling/eval
+- `sampler_gpus`: GPUs used for sharded vLLM sampling
 
-**Single-shot Reasoning**
+### Training
 
-To grade the responses for single-shot reasoning, collect the .csv files for a given seed run in a folder (e.g. ```results/qwen_math/MATH```) and pass it into ```legacy/eval_math.py```:
+- `batch_size`: optimizer batch size measured in prompts
+- `micro_batch_size`: number of prompts per gradient-accumulation micro-step
+- `score_micro_batch_size`: number of sampled partial completions scored together inside the loss
 
-```bash
-cd llm_experiments
-PYTHONPATH=. python legacy/eval_math.py results/qwen_math
-```
+Practical interpretation:
 
-```legacy/eval_gpqa.py``` is similar, and for ```legacy/eval_he.py```, an additional ```--output_fname``` argument is required, as HumanEval collects all responses in a jsonl file (e.g. ```--output_fname=qwen_math_he```).
+- `micro_batch_size` mainly affects training memory and throughput
+- `score_micro_batch_size` mainly affects inner loss-scoring memory and throughput
 
-For AlpacaEval 2.0, ```legacy/eval_alpaca.py``` collects a ```--folder``` into one json file ```--output_fname```. For evaluating the json file, follow the instructions in the official repo: https://github.com/tatsu-lab/alpaca_eval
+### Logging
 
+- `save_every_block`: save a full checkpoint at block boundaries
+- `save_every_steps`: save resumable checkpoints inside a block
+- `use_wandb`: enable experiment tracking
+- `wandb_log_every`: step-level wandb logging interval
 
-**Pass@k Performance**
+Current default behavior is conservative: step-level wandb logging is disabled by default in the maintained pipeline, because local logs and CSVs are more stable than very frequent remote logging.
 
-For pass@k performance, collect the .csv files across seeds in a folder again (e.g. ```results/qwen_math/MATH```) and pass into ```legacy/passk_math.py```:
-```bash
-python llm_experiments/legacy/passk_math.py --folder=results/qwen_math/MATH
-```
-The output is a plot of the pass@k performance. As with single-shot reasoning, ```legacy/eval_gpqa.py``` and ```legacy/eval_he.py``` are similar, but for the latter an additional ```--output_fname``` argument is required.
+## Current Design Choices
+
+### Single-GPU training
+
+The maintained trainer is single-GPU. This is deliberate. Earlier distributed training routes were unstable enough that the maintained path now prefers:
+
+- multi-GPU sampling when helpful
+- single-GPU training for reliability
+
+### Multi-GPU sampling is sharded, not tensor-parallel
+
+When you pass multiple `sampler_gpus`, the current code does **not** build one tensor-parallel vLLM engine. Instead it launches multiple single-GPU sampling workers and merges their buffers afterward.
+
+That choice is important for throughput on 7B-class models.
+
+### Offline buffers are first-class
+
+This repository is not trying to hide the offline-buffer compromise. The implementation explicitly chooses:
+
+- sampled CSV buffers on disk
+- resumable training from those buffers
+- deterministic inspection of stage data
+
+This makes the system easier to debug and easier to recover after interruptions.
+
+## Reading The Code
+
+If you want to understand the implementation from top to bottom, this is the most useful reading order:
+
+1. [`llm_experiments/run_blockwise_buffer_pipeline.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/run_blockwise_buffer_pipeline.py)
+2. [`llm_experiments/blockwise_vllm_sample_buffer.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_vllm_sample_buffer.py)
+3. [`llm_experiments/blockwise_power_tb_buffer_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_power_tb_buffer_train.py)
+4. [`llm_experiments/blockwise_power_tb_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_power_tb_train.py)
+
+That order mirrors the actual runtime:
+
+- scheduler
+- sampling
+- offline buffer training
+- shared model/loss/checkpoint utilities
+
+## What Is Not Described Here
+
+This README does not document:
+
+- archived experimental scripts in `legacy/`
+- removed distributed training launchers
+- historical manuscript variants
+- older full-completion buffer semantics
+
+Everything here is intended to describe the current maintained algorithm and the code that implements it.
