@@ -8,6 +8,7 @@ CONDA_ENV="${CONDA_ENV:-psamp}"
 HF_HOME="${HF_HOME:-/data/user/zhongal/.cache/huggingface}"
 MODEL_REPO="${MODEL_REPO:-Qwen/Qwen2.5-7B}"
 HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 
 module purge
 module load miniconda3
@@ -21,6 +22,7 @@ export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
 export HF_HUB_OFFLINE=0
 export TRANSFORMERS_OFFLINE=0
 export HF_ENDPOINT
+export HF_HUB_DISABLE_XET
 
 python - <<'PY'
 import os
@@ -30,12 +32,15 @@ from transformers import AutoTokenizer
 model_repo = os.environ.get("MODEL_REPO", "Qwen/Qwen2.5-7B")
 hf_home = os.environ.get("HF_HOME")
 hf_endpoint = os.environ.get("HF_ENDPOINT")
+disable_xet = os.environ.get("HF_HUB_DISABLE_XET")
 
 print(f"Downloading {model_repo} into HF_HOME={hf_home}", flush=True)
 print(f"Using HF_ENDPOINT={hf_endpoint}", flush=True)
+print(f"Using HF_HUB_DISABLE_XET={disable_xet}", flush=True)
 path = snapshot_download(
     repo_id=model_repo,
     resume_download=True,
+    max_workers=2,
 )
 print(f"Snapshot ready: {path}", flush=True)
 
