@@ -115,11 +115,11 @@ export WANDB_DISABLED
 
 echo "Python executable: $PYTHON_BIN"
 "$PYTHON_BIN" - <<'PY'
+import sys
 import torch
-import vllm
 
+print(f"sys.executable={sys.executable}", flush=True)
 print(f"torch={torch.__version__}", flush=True)
-print(f"vllm={vllm.__version__}", flush=True)
 PY
 
 cmd=(
