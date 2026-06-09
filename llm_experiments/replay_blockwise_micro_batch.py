@@ -13,6 +13,7 @@ from blockwise_power_tb_train import (
     enable_gradient_checkpointing,
     load_checkpoint_state,
     load_lora_model,
+    seed_everything,
     vargrad_tb_loss,
 )
 
@@ -34,7 +35,9 @@ def main():
     parser.add_argument("--beta", type=float, default=None)
     parser.add_argument("--completions_per_prefix", type=int, default=None)
     parser.add_argument("--score_micro_batch_size", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--gradient_checkpointing", action="store_true")
+    parser.add_argument("--fresh_model", action="store_true")
     parser.add_argument("--run_backward", action="store_true")
     parser.add_argument("--run_optimizer_step", action="store_true")
     parser.add_argument("--disable_backward_scaling", action="store_true")
@@ -83,7 +86,10 @@ def main():
         if args.score_micro_batch_size is not None
         else saved_args.get("score_micro_batch_size")
     )
+    seed = args.seed if args.seed is not None else int(saved_args.get("seed", 0))
     gradient_checkpointing = args.gradient_checkpointing or bool(saved_args.get("gradient_checkpointing", False))
+
+    seed_everything(seed)
 
     print(f"checkpoint_dir={checkpoint_dir}", flush=True)
     print(f"micro_batch_csvs={micro_batch_csvs}", flush=True)
@@ -93,6 +99,7 @@ def main():
         f"score_micro_batch_size={score_micro_batch_size} gradient_checkpointing={gradient_checkpointing}",
         flush=True,
     )
+    print(f"fresh_model={args.fresh_model} seed={seed}", flush=True)
     print(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}", flush=True)
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -104,7 +111,7 @@ def main():
         model_name,
         torch_dtype,
         device=device,
-        adapter_path=checkpoint_dir / "adapter",
+        adapter_path=None if args.fresh_model else checkpoint_dir / "adapter",
         attn_implementation=attn_implementation,
     )
     if gradient_checkpointing:
@@ -115,7 +122,8 @@ def main():
         [param for param in model.parameters() if param.requires_grad],
         lr=float(saved_args.get("lr", 1e-5)),
     )
-    load_checkpoint_state(checkpoint_dir, optimizer if args.run_optimizer_step else None, device)
+    if not args.fresh_model:
+        load_checkpoint_state(checkpoint_dir, optimizer if args.run_optimizer_step else None, device)
 
     step_every_micro_batches = max(0, int(args.step_every_micro_batches or 0))
     if args.run_backward or args.run_optimizer_step:
