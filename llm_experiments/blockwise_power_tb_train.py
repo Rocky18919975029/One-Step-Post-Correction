@@ -211,6 +211,11 @@ def completion_logprob_chunks(model, sequences, prompt_lens, attention_masks, eo
     return torch.cat(chunks, dim=0)
 
 
+def sync_cuda_if_available():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
 def sample_continuations(model, tokenizer, prefixes, max_new_tokens, temperature, num_return_sequences):
     model = unwrap_model(model)
     pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
@@ -323,17 +328,29 @@ def vargrad_tb_loss(
     beta,
     num_return_sequences,
     score_micro_batch_size=None,
+    debug_callback=None,
 ):
+    def log_phase(message):
+        if debug_callback is not None:
+            debug_callback(message)
+
     raw_model = unwrap_model(model)
     if not hasattr(raw_model, "disable_adapter"):
         raise RuntimeError("Reference logprob requires a PEFT LoRA model with disable_adapter().")
 
     if score_micro_batch_size is None or score_micro_batch_size >= sequences.shape[0]:
+        log_phase("theta forward begin full")
         logp_theta = completion_logprob(model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
+        sync_cuda_if_available()
+        log_phase("theta forward end full")
         with torch.no_grad():
             with raw_model.disable_adapter():
+                log_phase("ref forward begin full")
                 logp_ref = completion_logprob(raw_model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
+                sync_cuda_if_available()
+                log_phase("ref forward end full")
 
+        log_phase("loss assembly begin full")
         log_reward_augmented_target = alpha * logp_ref + rewards / beta
         log_z_terms = alpha * logp_ref - logp_theta.detach() + rewards / beta
         log_z_hat = log_z_terms.view(-1, num_return_sequences).mean(dim=1)
@@ -344,11 +361,13 @@ def vargrad_tb_loss(
             + logp_theta
             - log_reward_augmented_target.detach()
         ).pow(2).mean()
+        log_phase("loss assembly end full")
         return loss, logp_theta.detach(), logp_ref.detach()
 
     score_micro_batch_size = max(1, int(score_micro_batch_size))
     with torch.no_grad():
         with raw_model.disable_adapter():
+            log_phase(f"ref forward begin chunk_size={score_micro_batch_size}")
             logp_ref = completion_logprob_chunks(
                 raw_model,
                 sequences,
@@ -357,10 +376,13 @@ def vargrad_tb_loss(
                 tokenizer.eos_token_id,
                 score_micro_batch_size,
             ).detach()
+            sync_cuda_if_available()
+            log_phase("ref forward end")
 
     logp_theta_chunks = []
     for start in range(0, sequences.shape[0], score_micro_batch_size):
         end = min(start + score_micro_batch_size, sequences.shape[0])
+        log_phase(f"theta forward begin rows={start}:{end}")
         logp_theta = completion_logprob(
             model,
             sequences[start:end],
@@ -368,8 +390,11 @@ def vargrad_tb_loss(
             attention_masks[start:end],
             tokenizer.eos_token_id,
         )
+        sync_cuda_if_available()
+        log_phase(f"theta forward end rows={start}:{end}")
         logp_theta_chunks.append(logp_theta)
 
+    log_phase("loss assembly begin")
     logp_theta_all = torch.cat(logp_theta_chunks, dim=0)
     log_z_terms = alpha * logp_ref - logp_theta_all.detach() + rewards / beta
     log_z_hat = log_z_terms.view(-1, num_return_sequences).mean(dim=1)
@@ -378,6 +403,7 @@ def vargrad_tb_loss(
     target = (alpha * logp_ref + rewards / beta).detach()
     residual = expanded_log_z_hat.detach() + logp_theta_all - target
     loss = residual.pow(2).mean()
+    log_phase("loss assembly end")
     return loss, logp_theta_all.detach(), logp_ref.detach()
 
 

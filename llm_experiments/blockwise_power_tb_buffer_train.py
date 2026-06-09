@@ -538,6 +538,10 @@ def train_stage_from_buffer(
                     args.beta,
                     args.completions_per_prefix,
                     args.score_micro_batch_size,
+                    debug_callback=lambda message: debug_log(
+                        f"[block {block_idx}] step {step_id} loss {message}",
+                        rank=rank,
+                    ),
                 )
                 debug_log(f"[block {block_idx}] step {step_id} loss forward end", rank=rank)
                 micro_sequences = len(micro_df)
