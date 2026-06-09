@@ -1,6 +1,7 @@
 import argparse
 import faulthandler
 import gc
+import json
 import os
 import random
 import subprocess
@@ -110,6 +111,59 @@ def dump_micro_batch_debug(output_dir, block_idx, step_id, micro_start, micro_in
         "prompt_lens": [int(x) for x in prompt_lens],
     }
     torch.save(meta, debug_dir / f"{stem}.pt")
+
+
+def dump_active_forward_debug(
+    output_dir,
+    block_idx,
+    step_id,
+    micro_start,
+    chunk_start,
+    chunk_end,
+    micro_df,
+    prompt_lens,
+    sequences,
+    attention_masks,
+):
+    debug_dir = Path(output_dir) / "debug_logs" / "active_forward"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    chunk_df = micro_df.iloc[chunk_start:chunk_end].copy()
+    chunk_sequences = sequences[chunk_start:chunk_end].detach().cpu()
+    chunk_attention = attention_masks[chunk_start:chunk_end].detach().cpu()
+    chunk_prompt_lens = [int(value) for value in prompt_lens[chunk_start:chunk_end]]
+
+    meta = {
+        "block_idx": int(block_idx),
+        "step": int(step_id),
+        "micro_start": int(micro_start),
+        "chunk_start": int(chunk_start),
+        "chunk_end": int(chunk_end),
+        "rows": int(len(chunk_df)),
+        "seq_shape": [int(value) for value in chunk_sequences.shape],
+        "prompt_lens": chunk_prompt_lens,
+        "attention_sums": [int(value) for value in chunk_attention.sum(dim=1).tolist()],
+        "input_id_min": int(chunk_sequences.min().item()) if chunk_sequences.numel() else None,
+        "input_id_max": int(chunk_sequences.max().item()) if chunk_sequences.numel() else None,
+        "example_indices": [int(value) for value in chunk_df["example_idx"].tolist()] if "example_idx" in chunk_df else [],
+        "sample_indices": [int(value) for value in chunk_df["sample_idx"].tolist()] if "sample_idx" in chunk_df else [],
+    }
+
+    chunk_df.to_csv(debug_dir / "active_forward.csv", index=False)
+    torch.save(
+        {
+            "meta": meta,
+            "input_ids": chunk_sequences,
+            "attention_mask": chunk_attention,
+        },
+        debug_dir / "active_forward.pt",
+    )
+    with (debug_dir / "active_forward.json").open("w") as handle:
+        json.dump(meta, handle, indent=2)
+
+    stem = f"block{block_idx}_step{step_id}_micro{micro_start}_rows{chunk_start}_{chunk_end}"
+    chunk_df.to_csv(debug_dir / f"{stem}.csv", index=False)
+    with (debug_dir / f"{stem}.json").open("w") as handle:
+        json.dump(meta, handle, indent=2)
 
 
 def load_vllm(model_name, args, adapter_path=None):
@@ -614,6 +668,22 @@ def train_stage_from_buffer(
                         rank=rank,
                     ),
                     precomputed_logp_ref=precomputed_logp_ref,
+                    before_theta_chunk_callback=(
+                        None
+                        if args.disable_active_forward_debug_dump
+                        else lambda chunk_start, chunk_end: dump_active_forward_debug(
+                            args.output_dir,
+                            block_idx,
+                            step_id,
+                            micro_start,
+                            chunk_start,
+                            chunk_end,
+                            micro_df,
+                            prompt_lens,
+                            sequences,
+                            attention_masks,
+                        )
+                    ),
                 )
                 debug_log(f"[block {block_idx}] step {step_id} loss forward end", rank=rank)
                 micro_sequences = len(micro_df)
@@ -751,6 +821,7 @@ def main():
     parser.add_argument("--max_train_steps", type=int, default=0)
     parser.add_argument("--disable_tqdm", action="store_true")
     parser.add_argument("--disable_micro_batch_debug_dump", action="store_true")
+    parser.add_argument("--disable_active_forward_debug_dump", action="store_true")
     parser.add_argument("--disable_precompute_ref_logp", action="store_true")
     parser.add_argument("--ref_logp_batch_size", type=int, default=1)
     args = parser.parse_args()

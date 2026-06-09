@@ -330,6 +330,7 @@ def vargrad_tb_loss(
     score_micro_batch_size=None,
     debug_callback=None,
     precomputed_logp_ref=None,
+    before_theta_chunk_callback=None,
 ):
     def log_phase(message):
         if debug_callback is not None:
@@ -392,6 +393,8 @@ def vargrad_tb_loss(
     for start in range(0, sequences.shape[0], score_micro_batch_size):
         end = min(start + score_micro_batch_size, sequences.shape[0])
         log_phase(f"theta forward begin rows={start}:{end}")
+        if before_theta_chunk_callback is not None:
+            before_theta_chunk_callback(start, end)
         logp_theta = completion_logprob(
             model,
             sequences[start:end],
