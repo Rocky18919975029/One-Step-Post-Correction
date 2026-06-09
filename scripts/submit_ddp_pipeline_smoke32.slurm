@@ -14,10 +14,11 @@ set -euo pipefail
 
 # Same chess/H100 pipeline as submit_ddp_pipeline.slurm, but capped at 32
 # training examples and a separate output directory for a quick HPC sanity run.
+# Slurm executes a copied script from its spool directory, so resolve the shared
+# script through REPO_DIR instead of BASH_SOURCE.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
+export REPO_DIR="${REPO_DIR:-/data/user/zhongal/One-Step-Post-Correction}"
 export MAX_EXAMPLES="${MAX_EXAMPLES:-32}"
 export OUTPUT_DIR="${OUTPUT_DIR:-results/ddp_hpc_smoke32}"
 
-exec bash "$SCRIPT_DIR/submit_ddp_pipeline.slurm"
+exec bash "$REPO_DIR/scripts/submit_ddp_pipeline.slurm"
