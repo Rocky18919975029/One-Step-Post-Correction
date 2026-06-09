@@ -880,13 +880,14 @@ def main():
                 stage_adapter_path,
                 attn_implementation=args.attn_implementation,
             )
-            if args.gradient_checkpointing:
-                enable_gradient_checkpointing(model)
             model.train()
             if distributed:
                 debug_log(f"[block {block_idx}] wrapping model with DDP begin", rank=rank)
                 model = wrap_model_for_ddp(model, local_rank)
                 debug_log(f"[block {block_idx}] wrapping model with DDP end", rank=rank)
+            if args.gradient_checkpointing:
+                debug_log(f"[block {block_idx}] enabling gradient checkpointing", rank=rank)
+                enable_gradient_checkpointing(model)
             optimizer = torch.optim.AdamW(
                 [param for param in model.parameters() if param.requires_grad],
                 lr=args.lr,

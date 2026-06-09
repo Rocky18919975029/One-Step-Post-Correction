@@ -412,6 +412,7 @@ The maintained trainer defaults to single-GPU for reliability and can be launche
 - each DDP rank writes its own debug log under `debug_logs/trainer_rank*.log`
 - mid-block checkpointing with `save_every_steps` is not supported in DDP yet; use `save_every_block`
 - DDP initialization assumes every rank loads the same base model and adapter, so the trainer skips the expensive initial full-model parameter broadcast
+- when `gradient_checkpointing` is enabled with DDP, the trainer wraps the model with DDP before enabling checkpointing hooks
 
 ### Multi-GPU sampling is sharded, not tensor-parallel
 
