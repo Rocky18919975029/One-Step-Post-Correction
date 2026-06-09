@@ -1,6 +1,7 @@
 import argparse
 import faulthandler
 import gc
+import inspect
 import os
 import random
 import subprocess
@@ -80,6 +81,21 @@ def reduce_metric_values(values, device, distributed):
     if distributed:
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     return tensor.detach().cpu().tolist()
+
+
+def wrap_model_for_ddp(model, local_rank):
+    ddp_kwargs = {
+        "device_ids": [local_rank],
+        "output_device": local_rank,
+        "broadcast_buffers": False,
+        "find_unused_parameters": False,
+    }
+    ddp_signature = inspect.signature(DDP)
+    if "gradient_as_bucket_view" in ddp_signature.parameters:
+        ddp_kwargs["gradient_as_bucket_view"] = True
+    if "init_sync" in ddp_signature.parameters:
+        ddp_kwargs["init_sync"] = False
+    return DDP(model, **ddp_kwargs)
 
 
 def setup_debug_file(output_dir, name, dump_timeout_seconds=0):
@@ -868,7 +884,9 @@ def main():
                 enable_gradient_checkpointing(model)
             model.train()
             if distributed:
-                model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+                debug_log(f"[block {block_idx}] wrapping model with DDP begin", rank=rank)
+                model = wrap_model_for_ddp(model, local_rank)
+                debug_log(f"[block {block_idx}] wrapping model with DDP end", rank=rank)
             optimizer = torch.optim.AdamW(
                 [param for param in model.parameters() if param.requires_grad],
                 lr=args.lr,
