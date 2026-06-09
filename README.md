@@ -378,6 +378,7 @@ so training can restart from inside a block rather than repeating the whole bloc
 - `sampler_gpus`: GPUs used for sharded vLLM sampling
 - `train_gpus`: GPUs used by the trainer; defaults to `gpu`
 - `ddp_train`: launch the trainer with `torchrun` over all `train_gpus`
+- `eval_backend`: final evaluation backend; use `none` to skip final eval during smoke/debug runs
 
 ### Training
 

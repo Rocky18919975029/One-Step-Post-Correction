@@ -354,7 +354,7 @@ def main():
     parser.add_argument("--save_every_steps", type=int, default=0)
     parser.add_argument("--eval_examples", type=int, default=None)
     parser.add_argument("--eval_max_new_tokens", type=int, default=3072)
-    parser.add_argument("--eval_backend", type=str, default="vllm", choices=["hf", "vllm"])
+    parser.add_argument("--eval_backend", type=str, default="vllm", choices=["none", "hf", "vllm"])
     parser.add_argument("--eval_do_sample", action="store_true")
     parser.add_argument("--eval_temperature", type=float, default=0.25)
     parser.add_argument("--vllm_dtype", type=str, default="bfloat16")
@@ -408,6 +408,12 @@ def main():
 
     start_block = read_next_block_idx(output_dir)
     if start_block > args.num_blocks:
+        if args.eval_backend == "none":
+            print(
+                f"Checkpoint at {checkpoint_dir(output_dir)} is already past num_blocks={args.num_blocks}; eval skipped.",
+                flush=True,
+            )
+            return
         print(
             f"Checkpoint at {checkpoint_dir(output_dir)} is already past num_blocks={args.num_blocks}; running eval only.",
             flush=True,
@@ -444,6 +450,13 @@ def main():
             train_env,
         )
         step_idx += 1
+
+    if args.eval_backend == "none":
+        banner = f"[{step_idx}/{total_steps}] Skipping final eval"
+        print("\n" + "=" * len(banner), flush=True)
+        print(banner, flush=True)
+        print("=" * len(banner), flush=True)
+        return
 
     run_step(
         step_idx,
