@@ -193,6 +193,8 @@ def build_train_command(args, block_idx, output_dir):
     ]
     if args.gradient_checkpointing:
         command.append("--gradient_checkpointing")
+    if args.quiet_debug_logs:
+        command.append("--quiet_debug_logs")
     if args.save_samples:
         command.append("--save_samples")
     if args.save_every_block:
@@ -255,6 +257,8 @@ def build_eval_command(args, output_dir):
         command.extend(["--eval_temperature", str(args.eval_temperature)])
     if args.use_wandb:
         command.append("--use_wandb")
+    if args.quiet_debug_logs:
+        command.append("--quiet_debug_logs")
     if args.wandb_project is not None:
         command.extend(["--wandb_project", args.wandb_project])
     if args.wandb_entity is not None:
@@ -342,6 +346,7 @@ def main():
     parser.add_argument("--vllm_enforce_eager", action="store_true")
     parser.add_argument("--vllm_disable_custom_all_reduce", action="store_true")
     parser.add_argument("--debug_dump_timeout_seconds", type=int, default=60)
+    parser.add_argument("--quiet_debug_logs", action="store_true")
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="one-step-post-correction")
     parser.add_argument("--wandb_entity", type=str, default=None)

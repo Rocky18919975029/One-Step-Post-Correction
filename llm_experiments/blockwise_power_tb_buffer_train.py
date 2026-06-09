@@ -35,6 +35,7 @@ from power_samp_utils import format_prompt
 
 
 DEBUG_HANDLE = None
+QUIET_DEBUG_LOGS = False
 
 
 def resolve_data_path(path):
@@ -71,20 +72,21 @@ def close_debug_file():
         DEBUG_HANDLE = None
 
 
-def debug_log(message, rank=None):
+def debug_log(message, rank=None, always=False):
     timestamp = datetime.now().isoformat(timespec="seconds")
     prefix = f"[debug {timestamp} pid={os.getpid()}"
     if rank is not None:
         prefix += f" rank={rank}"
     prefix += "]"
     line = f"{prefix} {message}"
-    print(line, flush=True)
+    if always or not QUIET_DEBUG_LOGS:
+        print(line, flush=True)
     if DEBUG_HANDLE is not None:
         print(line, file=DEBUG_HANDLE, flush=True)
 
 
 def log_point(label, rank=0):
-    debug_log(f"{label}", rank=rank)
+    debug_log(f"{label}", rank=rank, always=True)
 
 
 def should_log_wandb_step(args, step):
@@ -677,7 +679,11 @@ def main():
     parser.add_argument("--max_train_steps", type=int, default=0)
     parser.add_argument("--disable_tqdm", action="store_true")
     parser.add_argument("--disable_micro_batch_debug_dump", action="store_true")
+    parser.add_argument("--quiet_debug_logs", action="store_true")
     args = parser.parse_args()
+
+    global QUIET_DEBUG_LOGS
+    QUIET_DEBUG_LOGS = bool(args.quiet_debug_logs)
 
     output_dir = Path(args.output_dir)
     debug_path = setup_debug_file(output_dir, f"trainer_preinit_pid{os.getpid()}.log", args.debug_dump_timeout_seconds)
@@ -911,8 +917,8 @@ def main():
         if wandb_run is not None:
             wandb_run.finish()
     except Exception:
-        debug_log("unhandled exception follows")
-        debug_log(traceback.format_exc().rstrip())
+        debug_log("unhandled exception follows", always=True)
+        debug_log(traceback.format_exc().rstrip(), always=True)
         raise
     finally:
         close_debug_file()
