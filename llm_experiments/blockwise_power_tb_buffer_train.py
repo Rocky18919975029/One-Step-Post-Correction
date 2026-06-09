@@ -585,12 +585,29 @@ def train_stage_from_buffer(
             rank_order = list(resume_rank_order)
         else:
             rank_order = list(default_order)
-            random.shuffle(rank_order)
+            if not args.disable_train_shuffle:
+                order_rng = random.Random(args.seed + block_idx * 100000 + epoch)
+                order_rng.shuffle(rank_order)
         if world_size > 1:
             remainder = len(rank_order) % world_size
             if remainder:
                 rank_order.extend(rank_order[: world_size - remainder])
             rank_order = rank_order[rank::world_size]
+        order_dir = Path(args.output_dir) / "debug_logs" / "rank_orders"
+        order_dir.mkdir(parents=True, exist_ok=True)
+        with (order_dir / f"block{block_idx}_epoch{epoch}_rank{rank}.json").open("w") as handle:
+            json.dump(
+                {
+                    "block_idx": int(block_idx),
+                    "epoch": int(epoch),
+                    "rank": int(rank),
+                    "disable_train_shuffle": bool(args.disable_train_shuffle),
+                    "order_seed": None if args.disable_train_shuffle else int(args.seed + block_idx * 100000 + epoch),
+                    "rank_order": [int(value) for value in rank_order],
+                },
+                handle,
+                indent=2,
+            )
         epoch_batch_start = resume_batch_start if epoch == start_epoch and resume_rank_order is not None else 0
 
         batch_iter = range(epoch_batch_start, len(rank_order), args.batch_size)
@@ -822,6 +839,7 @@ def main():
     parser.add_argument("--disable_tqdm", action="store_true")
     parser.add_argument("--disable_micro_batch_debug_dump", action="store_true")
     parser.add_argument("--disable_active_forward_debug_dump", action="store_true")
+    parser.add_argument("--disable_train_shuffle", action="store_true")
     parser.add_argument("--disable_precompute_ref_logp", action="store_true")
     parser.add_argument("--ref_logp_batch_size", type=int, default=1)
     args = parser.parse_args()
