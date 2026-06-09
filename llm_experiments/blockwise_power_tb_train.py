@@ -370,6 +370,8 @@ def vargrad_tb_loss(
 
     score_micro_batch_size = max(1, int(score_micro_batch_size))
     if precomputed_logp_ref is not None:
+        score_micro_batch_size = max(score_micro_batch_size, int(num_return_sequences))
+    if precomputed_logp_ref is not None:
         logp_ref = precomputed_logp_ref.to(device=sequences.device, dtype=torch.float32).detach()
     else:
         with torch.no_grad():
