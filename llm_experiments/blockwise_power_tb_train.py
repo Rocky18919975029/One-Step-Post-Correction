@@ -768,6 +768,7 @@ def main():
                     )
                     micro_sequences = len(micro_indices) * args.completions_per_prefix
                     (loss * (micro_sequences / total_sequences)).backward()
+                    sync_cuda_if_available()
                     loss_sum += float(loss.detach().cpu()) * micro_sequences
                     reward_sum += float(rewards.sum().detach().cpu())
                     logp_theta_sum += float(logp_theta.sum().cpu())

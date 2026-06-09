@@ -773,6 +773,7 @@ def train_stage_from_buffer(
                         attention_masks,
                     )
                 (loss * (micro_sequences / total_sequences)).backward()
+                sync_cuda_if_available()
                 debug_log(f"[block {block_idx}] step {step_id} backward end", rank=rank)
 
                 loss_sum += float(loss.detach().cpu()) * micro_sequences
