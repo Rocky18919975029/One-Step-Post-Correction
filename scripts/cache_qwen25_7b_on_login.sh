@@ -7,6 +7,7 @@ set -euo pipefail
 CONDA_ENV="${CONDA_ENV:-psamp}"
 HF_HOME="${HF_HOME:-/data/user/zhongal/.cache/huggingface}"
 MODEL_REPO="${MODEL_REPO:-Qwen/Qwen2.5-7B}"
+HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 
 module purge
 module load miniconda3
@@ -19,6 +20,7 @@ export HF_HOME
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
 export HF_HUB_OFFLINE=0
 export TRANSFORMERS_OFFLINE=0
+export HF_ENDPOINT
 
 python - <<'PY'
 import os
@@ -27,8 +29,10 @@ from transformers import AutoTokenizer
 
 model_repo = os.environ.get("MODEL_REPO", "Qwen/Qwen2.5-7B")
 hf_home = os.environ.get("HF_HOME")
+hf_endpoint = os.environ.get("HF_ENDPOINT")
 
 print(f"Downloading {model_repo} into HF_HOME={hf_home}", flush=True)
+print(f"Using HF_ENDPOINT={hf_endpoint}", flush=True)
 path = snapshot_download(
     repo_id=model_repo,
     resume_download=True,
