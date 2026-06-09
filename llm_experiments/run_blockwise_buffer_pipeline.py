@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import os
 import subprocess
 import sys
@@ -42,6 +43,25 @@ def run_step(step_idx, total_steps, title, command, env):
 
 def parse_gpu_list(gpu_spec):
     return [part.strip() for part in str(gpu_spec).split(",") if part.strip()]
+
+
+def resolve_data_path(path):
+    data_path = Path(path)
+    if data_path.exists():
+        return data_path
+    return SCRIPT_DIR / data_path
+
+
+def count_dataset_examples(path):
+    data_path = resolve_data_path(path)
+    if data_path.suffix == ".json":
+        with data_path.open("r") as handle:
+            return len(json.load(handle))
+    if data_path.suffix == ".parquet":
+        import pandas as pd
+
+        return len(pd.read_parquet(data_path, columns=[]))
+    raise ValueError(f"Unsupported dataset format for counting examples: {data_path}")
 
 
 def is_complete_buffer(output_dir, block_idx, args):
@@ -318,8 +338,6 @@ def apply_smoke_defaults(args):
 
 
 def fill_defaults(args):
-    if args.max_examples is None:
-        args.max_examples = 32
     if args.num_blocks is None:
         args.num_blocks = 3
     if args.eval_examples is None:
@@ -395,6 +413,10 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.max_examples is None:
+        args.max_examples = count_dataset_examples(args.data_path)
+        print(f"--max_examples not set; using full dataset count={args.max_examples}", flush=True)
 
     if args.sampler_gpus is None:
         args.sampler_gpus = args.gpu
