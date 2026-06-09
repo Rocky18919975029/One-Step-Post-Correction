@@ -109,6 +109,39 @@ Observed examples:
 
 The crash is not a normal Python exception. It is a native/runtime-level failure.
 
+## Current Diagnostic Hypothesis
+
+The most suspicious hot path is the chunked `score_micro_batch_size` branch in
+`vargrad_tb_loss`.
+
+Before the latest diagnostic change, each micro-batch with
+`--score_micro_batch_size 1` performed:
+
+1. a no-grad forward through the current LoRA-enabled model to compute detached
+   `logp_theta`;
+2. a no-grad forward through the same PEFT model with the adapter disabled to
+   compute `logp_ref`;
+3. a second forward through the current LoRA-enabled model to build the training
+   loss graph.
+
+That means the training loop repeatedly switched adapter state and ran many
+small forwards through the same Qwen model while gradient checkpointing and SDPA
+were enabled. Since dumped individual micro-batches replayed successfully, the
+failure may depend on repeated forward/kernel state over time rather than on a
+single bad sample.
+
+The latest code removes the redundant no-grad current-model forward in the
+chunked branch. It now computes `logp_ref` under `disable_adapter()`, then
+computes `logp_theta` once with gradients and uses `logp_theta.detach()` for the
+same `log_z_hat` estimate. This keeps the mathematical detach semantics while
+reducing current-model forward calls by about one third in the failing setup.
+
+If this eliminates the crash, the likely cause was interaction between repeated
+current-model forwards, PEFT adapter switching, gradient checkpointing, and the
+CUDA attention/linear kernels. If it still crashes, the next step is to add
+phase-level logs inside `vargrad_tb_loss` to distinguish whether the crash is in
+the reference forward or the gradient-carrying current-model forward.
+
 ## Important Reproduction Commands
 
 ### Direct Trainer Reproduction

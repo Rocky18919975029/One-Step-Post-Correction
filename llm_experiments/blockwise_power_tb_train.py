@@ -348,14 +348,6 @@ def vargrad_tb_loss(
 
     score_micro_batch_size = max(1, int(score_micro_batch_size))
     with torch.no_grad():
-        logp_theta_detached = completion_logprob_chunks(
-            model,
-            sequences,
-            prompt_lens,
-            attention_masks,
-            tokenizer.eos_token_id,
-            score_micro_batch_size,
-        ).detach()
         with raw_model.disable_adapter():
             logp_ref = completion_logprob_chunks(
                 raw_model,
@@ -366,11 +358,6 @@ def vargrad_tb_loss(
                 score_micro_batch_size,
             ).detach()
 
-    log_z_terms = alpha * logp_ref - logp_theta_detached + rewards / beta
-    log_z_hat = log_z_terms.view(-1, num_return_sequences).mean(dim=1)
-    expanded_log_z_hat = log_z_hat.repeat_interleave(num_return_sequences)
-
-    loss_terms = []
     logp_theta_chunks = []
     for start in range(0, sequences.shape[0], score_micro_batch_size):
         end = min(start + score_micro_batch_size, sequences.shape[0])
@@ -381,13 +368,17 @@ def vargrad_tb_loss(
             attention_masks[start:end],
             tokenizer.eos_token_id,
         )
-        target = (alpha * logp_ref[start:end] + rewards[start:end] / beta).detach()
-        residual = expanded_log_z_hat[start:end].detach() + logp_theta - target
-        loss_terms.append(residual.pow(2))
-        logp_theta_chunks.append(logp_theta.detach())
+        logp_theta_chunks.append(logp_theta)
 
-    loss = torch.cat(loss_terms, dim=0).mean()
-    return loss, torch.cat(logp_theta_chunks, dim=0), logp_ref.detach()
+    logp_theta_all = torch.cat(logp_theta_chunks, dim=0)
+    log_z_terms = alpha * logp_ref - logp_theta_all.detach() + rewards / beta
+    log_z_hat = log_z_terms.view(-1, num_return_sequences).mean(dim=1)
+    expanded_log_z_hat = log_z_hat.repeat_interleave(num_return_sequences)
+
+    target = (alpha * logp_ref + rewards / beta).detach()
+    residual = expanded_log_z_hat.detach() + logp_theta_all - target
+    loss = residual.pow(2).mean()
+    return loss, logp_theta_all.detach(), logp_ref.detach()
 
 
 def save_checkpoint(output_dir, model, tokenizer, optimizer, state, distributed):
