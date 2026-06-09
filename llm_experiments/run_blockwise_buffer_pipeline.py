@@ -408,10 +408,14 @@ def main():
     sampler_env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     if len(parse_gpu_list(args.sampler_gpus)) > 1:
         sampler_env.setdefault("NCCL_P2P_DISABLE", "1")
+        sampler_env.setdefault("NCCL_IB_DISABLE", "1")
 
     train_env = base_env.copy()
     train_env["CUDA_VISIBLE_DEVICES"] = args.train_gpus
     train_env["MASTER_PORT"] = str(args.train_master_port)
+    if args.ddp_train and len(parse_gpu_list(args.train_gpus)) > 1:
+        train_env.setdefault("NCCL_P2P_DISABLE", "1")
+        train_env.setdefault("NCCL_IB_DISABLE", "1")
 
     start_block = read_next_block_idx(output_dir)
     if start_block > args.num_blocks:
