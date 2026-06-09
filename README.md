@@ -92,7 +92,7 @@ The most important files are:
   - resume / checkpoint logic
 
 - [`llm_experiments/blockwise_power_tb_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_power_tb_train.py)
-  Shared lower-level utilities:
+  Shared lower-level utility module, not a runnable training entrypoint:
   - LoRA model loading
   - checkpoint save/load
   - trajectory-balance-style loss
@@ -104,7 +104,8 @@ The most important files are:
 - [`llm_experiments/inspect_blockwise_samples.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/inspect_blockwise_samples.py)
   Small inspection helper for looking through generated samples.
 
-Older scripts that are not part of the current maintained workflow live under [`llm_experiments/legacy`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/legacy).
+Historical training and evaluation scripts that are not part of the maintained
+workflow have been removed from this repository.
 
 ## End-to-End Workflow
 
@@ -395,7 +396,7 @@ That order mirrors the actual runtime:
 
 This README does not document:
 
-- archived experimental scripts in `legacy/`
+- historical experimental scripts removed from the maintained tree
 - removed distributed training launchers
 - historical manuscript variants
 - older full-completion buffer semantics
