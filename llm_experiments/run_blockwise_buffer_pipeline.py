@@ -231,11 +231,14 @@ def build_train_command(args, block_idx, output_dir):
         sys.executable,
         "-m",
         "torch.distributed.run",
-        "--standalone",
         "--nnodes",
         "1",
         "--nproc_per_node",
         str(nproc),
+        "--master_addr",
+        "127.0.0.1",
+        "--master_port",
+        str(args.train_master_port),
         *trainer_args[1:],
     ]
 
@@ -327,6 +330,8 @@ def main():
     parser.add_argument("--train_gpus", type=str, default=None)
     parser.add_argument("--ddp_train", action="store_true")
     parser.add_argument("--sampler_gpus", type=str, default=None)
+    parser.add_argument("--train_master_port", type=int, default=29600)
+    parser.add_argument("--sampler_master_port", type=int, default=29700)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--output_dir", type=str, default="results/blockwise_buffer_pipeline")
     parser.add_argument("--data_path", type=str, default="../data/train.parquet")
@@ -399,12 +404,14 @@ def main():
 
     sampler_env = base_env.copy()
     sampler_env["CUDA_VISIBLE_DEVICES"] = args.sampler_gpus
+    sampler_env["MASTER_PORT"] = str(args.sampler_master_port)
     sampler_env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     if len(parse_gpu_list(args.sampler_gpus)) > 1:
         sampler_env.setdefault("NCCL_P2P_DISABLE", "1")
 
     train_env = base_env.copy()
     train_env["CUDA_VISIBLE_DEVICES"] = args.train_gpus
+    train_env["MASTER_PORT"] = str(args.train_master_port)
 
     start_block = read_next_block_idx(output_dir)
     if start_block > args.num_blocks:

@@ -378,6 +378,8 @@ so training can restart from inside a block rather than repeating the whole bloc
 - `sampler_gpus`: GPUs used for sharded vLLM sampling
 - `train_gpus`: GPUs used by the trainer; defaults to `gpu`
 - `ddp_train`: launch the trainer with `torchrun` over all `train_gpus`
+- `train_master_port`: fixed torchrun rendezvous port for DDP training; defaults to `29600`
+- `sampler_master_port`: fixed `MASTER_PORT` passed to sampler workers; defaults to `29700`
 - `eval_backend`: final evaluation backend; use `none` to skip final eval during smoke/debug runs
 
 ### Training
@@ -414,6 +416,7 @@ The maintained trainer defaults to single-GPU for reliability and can be launche
 - mid-block checkpointing with `save_every_steps` is not supported in DDP yet; use `save_every_block`
 - DDP initialization assumes every rank loads the same base model and adapter, so the trainer skips the expensive initial full-model parameter broadcast
 - when `gradient_checkpointing` is enabled with DDP, the trainer wraps the model with DDP before enabling checkpointing hooks
+- DDP training and vLLM sampler workers use separate default ports, `29600` and `29700`, to avoid stale rendezvous/NCCL port collisions between stages
 
 ### Multi-GPU sampling is sharded, not tensor-parallel
 
