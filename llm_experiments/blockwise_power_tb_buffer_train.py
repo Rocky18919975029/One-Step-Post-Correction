@@ -468,7 +468,10 @@ def train_stage_from_buffer(
             rank_order = rank_order[rank::world_size]
         epoch_batch_start = resume_batch_start if epoch == start_epoch and resume_rank_order is not None else 0
 
-        for start in tqdm(range(epoch_batch_start, len(rank_order), args.batch_size), desc=f"block {block_idx} epoch {epoch}"):
+        batch_iter = range(epoch_batch_start, len(rank_order), args.batch_size)
+        if not args.disable_tqdm:
+            batch_iter = tqdm(batch_iter, desc=f"block {block_idx} epoch {epoch}")
+        for start in batch_iter:
             batch_indices = rank_order[start:start + args.batch_size]
             optimizer.zero_grad(set_to_none=True)
             step_id = global_step + 1
@@ -508,16 +511,17 @@ def train_stage_from_buffer(
                     micro_df,
                     next(unwrap_model(model).parameters()).device,
                 )
-                dump_micro_batch_debug(
-                    args.output_dir,
-                    block_idx,
-                    step_id,
-                    micro_start,
-                    micro_indices,
-                    micro_df,
-                    prompt_lens,
-                    sequences,
-                )
+                if not args.disable_micro_batch_debug_dump:
+                    dump_micro_batch_debug(
+                        args.output_dir,
+                        block_idx,
+                        step_id,
+                        micro_start,
+                        micro_indices,
+                        micro_df,
+                        prompt_lens,
+                        sequences,
+                    )
                 debug_log(
                     f"[block {block_idx}] step {step_id} micro prepared rows={len(micro_df)} seq_shape={tuple(sequences.shape)} max_prompt_len={max(prompt_lens)} reward_mean={float(rewards.mean().detach().cpu()):.4f}",
                     rank=rank,
@@ -606,6 +610,12 @@ def train_stage_from_buffer(
                     resume_batch_start=start + args.batch_size,
                     resume_rank_order=rank_order,
                 )
+            if args.max_train_steps and global_step >= args.max_train_steps:
+                debug_log(
+                    f"[block {block_idx}] reached max_train_steps={args.max_train_steps}; stopping training loop",
+                    rank=rank,
+                )
+                return global_step
     return global_step
 
 
@@ -662,6 +672,9 @@ def main():
     parser.add_argument("--vllm_disable_custom_all_reduce", action="store_true")
     parser.add_argument("--skip_buffer_sampling", action="store_true")
     parser.add_argument("--debug_dump_timeout_seconds", type=int, default=600)
+    parser.add_argument("--max_train_steps", type=int, default=0)
+    parser.add_argument("--disable_tqdm", action="store_true")
+    parser.add_argument("--disable_micro_batch_debug_dump", action="store_true")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)

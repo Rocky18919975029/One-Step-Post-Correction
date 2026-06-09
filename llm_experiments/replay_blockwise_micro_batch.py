@@ -1,4 +1,5 @@
 import argparse
+import glob
 import os
 from pathlib import Path
 import re
@@ -46,10 +47,7 @@ def main():
 
     micro_batch_csvs = list(args.micro_batch_csv or [])
     if args.micro_batch_glob:
-        matched = sorted(
-            Path().glob(args.micro_batch_glob),
-            key=lambda p: natural_key(str(p)),
-        )
+        matched = sorted((Path(path) for path in glob.glob(args.micro_batch_glob)), key=lambda p: natural_key(str(p)))
         micro_batch_csvs.extend(str(path) for path in matched)
     if not micro_batch_csvs:
         raise ValueError("Provide at least one --micro_batch_csv or --micro_batch_glob.")
