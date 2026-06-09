@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=ospc-ddp
 #SBATCH --partition=acd_u
-#SBATCH --account=d_tonggeh+
+#SBATCH --account=zhongal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:8
@@ -19,7 +19,7 @@ set -euo pipefail
 # Common overrides:
 #   sbatch --export=ALL,NUM_BLOCKS=16,MAX_EXAMPLES=500,OUTPUT_DIR=results/full_ddp scripts/submit_ddp_pipeline.slurm
 #
-# Tuned for the chess Slurm cluster, acd_u partition, account d_tonggeh+, 1 node
+# Tuned for the chess Slurm cluster, acd_u partition, account zhongal, 1 node
 # with 8 NVIDIA H100 80GB GPUs.
 # GPU compute nodes are assumed to have no internet access. Make sure the model
 # and datasets are already present in the local Hugging Face/data caches.
