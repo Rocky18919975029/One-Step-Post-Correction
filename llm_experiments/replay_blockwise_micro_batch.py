@@ -38,6 +38,7 @@ def main():
     parser.add_argument("--run_backward", action="store_true")
     parser.add_argument("--run_optimizer_step", action="store_true")
     parser.add_argument("--disable_backward_scaling", action="store_true")
+    parser.add_argument("--step_every_micro_batches", type=int, default=0)
     args = parser.parse_args()
 
     micro_batch_csvs = list(args.micro_batch_csv or [])
@@ -116,11 +117,18 @@ def main():
     )
     load_checkpoint_state(checkpoint_dir, optimizer if args.run_optimizer_step else None, device)
 
+    step_every_micro_batches = max(0, int(args.step_every_micro_batches or 0))
     if args.run_backward or args.run_optimizer_step:
         optimizer.zero_grad(set_to_none=True)
 
     total_sequences = int(saved_args.get("batch_size", 1)) * completions_per_prefix
     for idx, micro_batch_csv in enumerate(micro_batch_csvs, start=1):
+        if (args.run_backward or args.run_optimizer_step) and step_every_micro_batches > 0:
+            if (idx - 1) % step_every_micro_batches == 0:
+                print(f"zero_grad begin step_group={(idx - 1) // step_every_micro_batches + 1}", flush=True)
+                optimizer.zero_grad(set_to_none=True)
+                print(f"zero_grad end step_group={(idx - 1) // step_every_micro_batches + 1}", flush=True)
+
         print(f"=== replay {idx}/{len(micro_batch_csvs)}: {micro_batch_csv} ===", flush=True)
         micro_df = pd.read_csv(micro_batch_csv)
         sequences, prompt_lens, attention_masks, rewards = encode_buffer_group(
@@ -167,7 +175,12 @@ def main():
             backward_loss.backward()
             print("backward end", flush=True)
 
-    if args.run_optimizer_step:
+        if args.run_optimizer_step and step_every_micro_batches > 0 and idx % step_every_micro_batches == 0:
+            print(f"optimizer step begin step_group={idx // step_every_micro_batches}", flush=True)
+            optimizer.step()
+            print(f"optimizer step end step_group={idx // step_every_micro_batches}", flush=True)
+
+    if args.run_optimizer_step and step_every_micro_batches <= 0:
         print("optimizer step begin", flush=True)
         optimizer.step()
         print("optimizer step end", flush=True)
