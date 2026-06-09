@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=ospc-ddp
+#SBATCH --partition=acd_u
+#SBATCH --account=zhongal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=256G
-#SBATCH --time=48:00:00
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
+#SBATCH --gres=gpu:8
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=640G
+#SBATCH --time=7-00:00:00
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
 
 set -euo pipefail
 
@@ -17,21 +19,22 @@ set -euo pipefail
 # Common overrides:
 #   sbatch --export=ALL,NUM_BLOCKS=16,MAX_EXAMPLES=500,OUTPUT_DIR=results/full_ddp scripts/submit_ddp_pipeline.slurm
 #
-# Edit the SBATCH partition/account lines above if your HPC requires them.
+# Tuned for the chess Slurm cluster, acd_u partition, account zhongal, 1 node
+# with 8 NVIDIA H100 80GB GPUs.
 # GPU compute nodes are assumed to have no internet access. Make sure the model
 # and datasets are already present in the local Hugging Face/data caches.
 
-REPO_DIR="${REPO_DIR:-$PWD}"
+REPO_DIR="${REPO_DIR:-/data/user/zhongal/One-Step-Post-Correction}"
 CONDA_ENV="${CONDA_ENV:-psamp}"
-CONDA_SH="${CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
-HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+CONDA_SH="${CONDA_SH:-}"
+HF_HOME="${HF_HOME:-/data/user/zhongal/.cache/huggingface}"
 TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
 HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 WANDB_MODE="${WANDB_MODE:-offline}"
 WANDB_DISABLED="${WANDB_DISABLED:-true}"
 
-GPU_IDS="${GPU_IDS:-0,1,2,3}"
+GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
 TRAIN_GPUS="${TRAIN_GPUS:-$GPU_IDS}"
 SAMPLER_GPUS="${SAMPLER_GPUS:-$GPU_IDS}"
 
@@ -74,11 +77,15 @@ SAMPLER_MASTER_PORT="${SAMPLER_MASTER_PORT:-$((TRAIN_MASTER_PORT + 1))}"
 
 mkdir -p logs
 
-if [[ -f "$CONDA_SH" ]]; then
-  # shellcheck source=/dev/null
-  source "$CONDA_SH"
-  conda activate "$CONDA_ENV"
+module purge
+module load miniconda3
+
+if [[ -z "$CONDA_SH" ]]; then
+  CONDA_SH="$(conda info --base)/etc/profile.d/conda.sh"
 fi
+# shellcheck source=/dev/null
+source "$CONDA_SH"
+conda activate "$CONDA_ENV"
 
 cd "$REPO_DIR/llm_experiments"
 
