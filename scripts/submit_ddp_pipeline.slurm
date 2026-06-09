@@ -18,10 +18,18 @@ set -euo pipefail
 #   sbatch --export=ALL,NUM_BLOCKS=16,MAX_EXAMPLES=500,OUTPUT_DIR=results/full_ddp scripts/submit_ddp_pipeline.slurm
 #
 # Edit the SBATCH partition/account lines above if your HPC requires them.
+# GPU compute nodes are assumed to have no internet access. Make sure the model
+# and datasets are already present in the local Hugging Face/data caches.
 
 REPO_DIR="${REPO_DIR:-$PWD}"
 CONDA_ENV="${CONDA_ENV:-psamp}"
 CONDA_SH="${CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
+HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
+HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+WANDB_MODE="${WANDB_MODE:-offline}"
+WANDB_DISABLED="${WANDB_DISABLED:-true}"
 
 GPU_IDS="${GPU_IDS:-0,1,2,3}"
 TRAIN_GPUS="${TRAIN_GPUS:-$GPU_IDS}"
@@ -78,6 +86,12 @@ export PYTHONUNBUFFERED=1
 export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
 export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export HF_HOME
+export TRANSFORMERS_CACHE
+export HF_HUB_OFFLINE
+export TRANSFORMERS_OFFLINE
+export WANDB_MODE
+export WANDB_DISABLED
 
 cmd=(
   python run_blockwise_buffer_pipeline.py
