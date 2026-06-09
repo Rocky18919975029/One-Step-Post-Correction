@@ -142,6 +142,20 @@ CUDA attention/linear kernels. If it still crashes, the next step is to add
 phase-level logs inside `vargrad_tb_loss` to distinguish whether the crash is in
 the reference forward or the gradient-carrying current-model forward.
 
+### Follow-up: Avoid Adapter Switching During Training
+
+Later diagnostics showed that the crash can also happen after the reference
+forward completes, during later theta forwards or backward. This points more
+strongly at repeated `disable_adapter()` state switching on the same PEFT model
+than at one fixed bad sample.
+
+The current training path therefore precomputes the base-model reference
+log-probability into each `buffers/block_k.csv` as a `logp_ref` column before
+loading the LoRA training model. Training then consumes this column directly and
+does not call `disable_adapter()` in the normal loss path. This keeps the same
+reference target while avoiding PEFT adapter toggling inside the hot training
+loop.
+
 ## Important Reproduction Commands
 
 ### Direct Trainer Reproduction

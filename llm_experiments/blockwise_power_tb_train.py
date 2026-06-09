@@ -329,13 +329,14 @@ def vargrad_tb_loss(
     num_return_sequences,
     score_micro_batch_size=None,
     debug_callback=None,
+    precomputed_logp_ref=None,
 ):
     def log_phase(message):
         if debug_callback is not None:
             debug_callback(message)
 
     raw_model = unwrap_model(model)
-    if not hasattr(raw_model, "disable_adapter"):
+    if precomputed_logp_ref is None and not hasattr(raw_model, "disable_adapter"):
         raise RuntimeError("Reference logprob requires a PEFT LoRA model with disable_adapter().")
 
     if score_micro_batch_size is None or score_micro_batch_size >= sequences.shape[0]:
@@ -343,12 +344,15 @@ def vargrad_tb_loss(
         logp_theta = completion_logprob(model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
         sync_cuda_if_available()
         log_phase("theta forward end full")
-        with torch.no_grad():
-            with raw_model.disable_adapter():
-                log_phase("ref forward begin full")
-                logp_ref = completion_logprob(raw_model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
-                sync_cuda_if_available()
-                log_phase("ref forward end full")
+        if precomputed_logp_ref is not None:
+            logp_ref = precomputed_logp_ref.to(device=logp_theta.device, dtype=torch.float32).detach()
+        else:
+            with torch.no_grad():
+                with raw_model.disable_adapter():
+                    log_phase("ref forward begin full")
+                    logp_ref = completion_logprob(raw_model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
+                    sync_cuda_if_available()
+                    log_phase("ref forward end full")
 
         log_phase("loss assembly begin full")
         log_reward_augmented_target = alpha * logp_ref + rewards / beta
@@ -365,19 +369,22 @@ def vargrad_tb_loss(
         return loss, logp_theta.detach(), logp_ref.detach()
 
     score_micro_batch_size = max(1, int(score_micro_batch_size))
-    with torch.no_grad():
-        with raw_model.disable_adapter():
-            log_phase(f"ref forward begin chunk_size={score_micro_batch_size}")
-            logp_ref = completion_logprob_chunks(
-                raw_model,
-                sequences,
-                prompt_lens,
-                attention_masks,
-                tokenizer.eos_token_id,
-                score_micro_batch_size,
-            ).detach()
-            sync_cuda_if_available()
-            log_phase("ref forward end")
+    if precomputed_logp_ref is not None:
+        logp_ref = precomputed_logp_ref.to(device=sequences.device, dtype=torch.float32).detach()
+    else:
+        with torch.no_grad():
+            with raw_model.disable_adapter():
+                log_phase(f"ref forward begin chunk_size={score_micro_batch_size}")
+                logp_ref = completion_logprob_chunks(
+                    raw_model,
+                    sequences,
+                    prompt_lens,
+                    attention_masks,
+                    tokenizer.eos_token_id,
+                    score_micro_batch_size,
+                ).detach()
+                sync_cuda_if_available()
+                log_phase("ref forward end")
 
     logp_theta_chunks = []
     for start in range(0, sequences.shape[0], score_micro_batch_size):

@@ -137,7 +137,7 @@ def main():
 
         print(f"=== replay {idx}/{len(micro_batch_csvs)}: {micro_batch_csv} ===", flush=True)
         micro_df = pd.read_csv(micro_batch_csv)
-        sequences, prompt_lens, attention_masks, rewards = encode_buffer_group(
+        sequences, prompt_lens, attention_masks, rewards, precomputed_logp_ref = encode_buffer_group(
             tokenizer,
             micro_df,
             device,
@@ -160,6 +160,7 @@ def main():
             beta,
             completions_per_prefix,
             score_micro_batch_size,
+            precomputed_logp_ref=precomputed_logp_ref,
         )
         print("loss forward end", flush=True)
         print(
