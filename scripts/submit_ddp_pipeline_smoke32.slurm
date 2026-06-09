@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=ospc-ddp-smoke32
 #SBATCH --partition=acd_u
-#SBATCH --account=zhongal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:8
