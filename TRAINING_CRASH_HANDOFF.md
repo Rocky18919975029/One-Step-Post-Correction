@@ -1,8 +1,14 @@
 # Training Crash Handoff
 
-This document summarizes the current unresolved training crash in the latest
-blockwise offline-buffer implementation. It is intended as a concise handoff for
-another AI assistant or human engineer.
+This document preserves the historical investigation notes for the blockwise
+offline-buffer training crash.
+
+The crash is now resolved. The final root cause and fix are documented in
+[`TRAINING_SEGFAULT_ROOT_CAUSE.md`](TRAINING_SEGFAULT_ROOT_CAUSE.md). In short:
+gradient-checkpointed micro-batch backward work was not synchronized before the
+next micro-batch forward, which could trigger intermittent native CUDA
+segfaults. The fix is to synchronize CUDA immediately after each micro-batch
+`backward()`.
 
 ## Current Algorithm State
 
@@ -83,7 +89,7 @@ Reusing sampled buffer for block 1
 Found complete buffer at .../buffers/block_1.csv; skipping sampling.
 ```
 
-## The Unresolved Problem
+## Resolved Problem
 
 Training crashes during block 1 with a hard crash:
 
@@ -107,54 +113,10 @@ Observed examples:
 - when faulthandler fired during one hang, the main thread was inside
   `torch.nn.modules.linear.py` `forward`.
 
-The crash is not a normal Python exception. It is a native/runtime-level failure.
-
-## Current Diagnostic Hypothesis
-
-The most suspicious hot path is the chunked `score_micro_batch_size` branch in
-`vargrad_tb_loss`.
-
-Before the latest diagnostic change, each micro-batch with
-`--score_micro_batch_size 1` performed:
-
-1. a no-grad forward through the current LoRA-enabled model to compute detached
-   `logp_theta`;
-2. a no-grad forward through the same PEFT model with the adapter disabled to
-   compute `logp_ref`;
-3. a second forward through the current LoRA-enabled model to build the training
-   loss graph.
-
-That means the training loop repeatedly switched adapter state and ran many
-small forwards through the same Qwen model while gradient checkpointing and SDPA
-were enabled. Since dumped individual micro-batches replayed successfully, the
-failure may depend on repeated forward/kernel state over time rather than on a
-single bad sample.
-
-The latest code removes the redundant no-grad current-model forward in the
-chunked branch. It now computes `logp_ref` under `disable_adapter()`, then
-computes `logp_theta` once with gradients and uses `logp_theta.detach()` for the
-same `log_z_hat` estimate. This keeps the mathematical detach semantics while
-reducing current-model forward calls by about one third in the failing setup.
-
-If this eliminates the crash, the likely cause was interaction between repeated
-current-model forwards, PEFT adapter switching, gradient checkpointing, and the
-CUDA attention/linear kernels. If it still crashes, the next step is to add
-phase-level logs inside `vargrad_tb_loss` to distinguish whether the crash is in
-the reference forward or the gradient-carrying current-model forward.
-
-### Follow-up: Avoid Adapter Switching During Training
-
-Later diagnostics showed that the crash can also happen after the reference
-forward completes, during later theta forwards or backward. This points more
-strongly at repeated `disable_adapter()` state switching on the same PEFT model
-than at one fixed bad sample.
-
-The current training path therefore precomputes the base-model reference
-log-probability into each `buffers/block_k.csv` as a `logp_ref` column before
-loading the LoRA training model. Training then consumes this column directly and
-does not call `disable_adapter()` in the normal loss path. This keeps the same
-reference target while avoiding PEFT adapter toggling inside the hot training
-loop.
+The crash was not a normal Python exception. It was a native/runtime-level
+failure. The successful fix was to call `sync_cuda_if_available()` immediately
+after each micro-batch `backward()` before entering the next micro-batch
+forward.
 
 ## Important Reproduction Commands
 

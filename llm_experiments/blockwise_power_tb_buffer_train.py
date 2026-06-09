@@ -1,7 +1,6 @@
 import argparse
 import faulthandler
 import gc
-import json
 import os
 import random
 import subprocess
@@ -18,7 +17,6 @@ from tqdm import tqdm
 
 from blockwise_power_tb_train import (
     MODEL_NAME_BY_KEY,
-    completion_logprob_chunks,
     completion_end,
     enable_gradient_checkpointing,
     evaluate_model,
@@ -26,7 +24,6 @@ from blockwise_power_tb_train import (
     load_lora_model,
     load_math_dataset,
     maybe_init_wandb,
-    parse_torch_dtype,
     save_checkpoint,
     score_completion,
     seed_everything,
@@ -111,104 +108,6 @@ def dump_micro_batch_debug(output_dir, block_idx, step_id, micro_start, micro_in
         "prompt_lens": [int(x) for x in prompt_lens],
     }
     torch.save(meta, debug_dir / f"{stem}.pt")
-
-
-def dump_active_forward_debug(
-    output_dir,
-    block_idx,
-    step_id,
-    micro_start,
-    chunk_start,
-    chunk_end,
-    micro_df,
-    prompt_lens,
-    sequences,
-    attention_masks,
-):
-    debug_dir = Path(output_dir) / "debug_logs" / "active_forward"
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    chunk_df = micro_df.iloc[chunk_start:chunk_end].copy()
-    chunk_sequences = sequences[chunk_start:chunk_end].detach().cpu()
-    chunk_attention = attention_masks[chunk_start:chunk_end].detach().cpu()
-    chunk_prompt_lens = [int(value) for value in prompt_lens[chunk_start:chunk_end]]
-
-    meta = {
-        "block_idx": int(block_idx),
-        "step": int(step_id),
-        "micro_start": int(micro_start),
-        "chunk_start": int(chunk_start),
-        "chunk_end": int(chunk_end),
-        "rows": int(len(chunk_df)),
-        "seq_shape": [int(value) for value in chunk_sequences.shape],
-        "prompt_lens": chunk_prompt_lens,
-        "attention_sums": [int(value) for value in chunk_attention.sum(dim=1).tolist()],
-        "input_id_min": int(chunk_sequences.min().item()) if chunk_sequences.numel() else None,
-        "input_id_max": int(chunk_sequences.max().item()) if chunk_sequences.numel() else None,
-        "example_indices": [int(value) for value in chunk_df["example_idx"].tolist()] if "example_idx" in chunk_df else [],
-        "sample_indices": [int(value) for value in chunk_df["sample_idx"].tolist()] if "sample_idx" in chunk_df else [],
-    }
-
-    chunk_df.to_csv(debug_dir / "active_forward.csv", index=False)
-    torch.save(
-        {
-            "meta": meta,
-            "input_ids": chunk_sequences,
-            "attention_mask": chunk_attention,
-        },
-        debug_dir / "active_forward.pt",
-    )
-    with (debug_dir / "active_forward.json").open("w") as handle:
-        json.dump(meta, handle, indent=2)
-
-    stem = f"block{block_idx}_step{step_id}_micro{micro_start}_rows{chunk_start}_{chunk_end}"
-    chunk_df.to_csv(debug_dir / f"{stem}.csv", index=False)
-    with (debug_dir / f"{stem}.json").open("w") as handle:
-        json.dump(meta, handle, indent=2)
-
-
-def dump_active_backward_debug(
-    output_dir,
-    block_idx,
-    step_id,
-    micro_start,
-    micro_df,
-    prompt_lens,
-    sequences,
-    attention_masks,
-):
-    debug_dir = Path(output_dir) / "debug_logs" / "active_backward"
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    cpu_sequences = sequences.detach().cpu()
-    cpu_attention = attention_masks.detach().cpu()
-    meta = {
-        "block_idx": int(block_idx),
-        "step": int(step_id),
-        "micro_start": int(micro_start),
-        "rows": int(len(micro_df)),
-        "seq_shape": [int(value) for value in cpu_sequences.shape],
-        "prompt_lens": [int(value) for value in prompt_lens],
-        "attention_sums": [int(value) for value in cpu_attention.sum(dim=1).tolist()],
-        "input_id_min": int(cpu_sequences.min().item()) if cpu_sequences.numel() else None,
-        "input_id_max": int(cpu_sequences.max().item()) if cpu_sequences.numel() else None,
-        "example_indices": [int(value) for value in micro_df["example_idx"].tolist()] if "example_idx" in micro_df else [],
-        "sample_indices": [int(value) for value in micro_df["sample_idx"].tolist()] if "sample_idx" in micro_df else [],
-    }
-    micro_df.to_csv(debug_dir / "active_backward.csv", index=False)
-    torch.save(
-        {
-            "meta": meta,
-            "input_ids": cpu_sequences,
-            "attention_mask": cpu_attention,
-        },
-        debug_dir / "active_backward.pt",
-    )
-    with (debug_dir / "active_backward.json").open("w") as handle:
-        json.dump(meta, handle, indent=2)
-
-    stem = f"block{block_idx}_step{step_id}_micro{micro_start}"
-    micro_df.to_csv(debug_dir / f"{stem}.csv", index=False)
-    with (debug_dir / f"{stem}.json").open("w") as handle:
-        json.dump(meta, handle, indent=2)
 
 
 def load_vllm(model_name, args, adapter_path=None):
@@ -506,8 +405,6 @@ def encode_buffer_group(tokenizer, rows, device):
     sequences = []
     prompt_lens = []
     rewards = []
-    precomputed_logp_refs = []
-    has_precomputed_logp_ref = "logp_ref" in rows.columns
     for _, row in rows.iterrows():
         prefix_ids = tokenizer.encode(str(row["prefix_text"]))
         completion_ids = tokenizer.encode(str(row["completion"]), add_special_tokens=False)
@@ -515,8 +412,6 @@ def encode_buffer_group(tokenizer, rows, device):
         sequences.append(seq)
         prompt_lens.append(len(prefix_ids))
         rewards.append(float(row["reward"]))
-        if has_precomputed_logp_ref:
-            precomputed_logp_refs.append(float(row["logp_ref"]))
 
     max_len = max(len(seq) for seq in sequences)
     pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
@@ -527,76 +422,12 @@ def encode_buffer_group(tokenizer, rows, device):
         padded.append(seq + [pad_token_id] * pad_len)
         attention_masks.append([1] * len(seq) + [0] * pad_len)
 
-    precomputed_logp_ref_tensor = None
-    if has_precomputed_logp_ref:
-        precomputed_logp_ref_tensor = torch.tensor(precomputed_logp_refs, dtype=torch.float32, device=device)
-
     return (
         torch.tensor(padded, dtype=torch.long, device=device),
         prompt_lens,
         torch.tensor(attention_masks, dtype=torch.long, device=device),
         torch.tensor(rewards, dtype=torch.float32, device=device),
-        precomputed_logp_ref_tensor,
     )
-
-
-def has_complete_logp_ref(buffer_df):
-    if "logp_ref" not in buffer_df.columns:
-        return False
-    values = pd.to_numeric(buffer_df["logp_ref"], errors="coerce")
-    return bool(values.notna().all() and np.isfinite(values.to_numpy(dtype=np.float64)).all())
-
-
-def precompute_buffer_logp_ref(model_name, tokenizer, buffer_df, buffer_path, args, device, rank):
-    if has_complete_logp_ref(buffer_df):
-        debug_log(f"reference logp already present in {buffer_path}", rank=rank)
-        return buffer_df
-    if args.disable_precompute_ref_logp:
-        debug_log("reference logp precompute disabled; falling back to adapter-disabled training reference", rank=rank)
-        return buffer_df
-
-    debug_log(f"precomputing reference logp for {len(buffer_df)} buffer rows", rank=rank)
-    model_kwargs = {
-        "torch_dtype": parse_torch_dtype(args.torch_dtype),
-        "trust_remote_code": True,
-    }
-    if args.attn_implementation is not None:
-        model_kwargs["attn_implementation"] = args.attn_implementation
-    ref_model = transformers.AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs).to(device)
-    ref_model.eval()
-
-    ref_values = []
-    batch_size = max(1, int(args.ref_logp_batch_size))
-    chunk_size = args.score_micro_batch_size if args.score_micro_batch_size is not None else batch_size
-    try:
-        with torch.no_grad():
-            row_iter = range(0, len(buffer_df), batch_size)
-            if not args.disable_tqdm:
-                row_iter = tqdm(row_iter, desc="precompute ref logp")
-            for start in row_iter:
-                end = min(start + batch_size, len(buffer_df))
-                batch_df = buffer_df.iloc[start:end]
-                sequences, prompt_lens, attention_masks, _, _ = encode_buffer_group(tokenizer, batch_df, device)
-                logp_ref = completion_logprob_chunks(
-                    ref_model,
-                    sequences,
-                    prompt_lens,
-                    attention_masks,
-                    tokenizer.eos_token_id,
-                    max(1, int(chunk_size)),
-                )
-                sync_cuda_if_available()
-                ref_values.extend(float(value) for value in logp_ref.detach().cpu().tolist())
-                del sequences, attention_masks, logp_ref
-    finally:
-        del ref_model
-        clear_cuda()
-
-    buffer_df = buffer_df.copy()
-    buffer_df["logp_ref"] = ref_values
-    buffer_df.to_csv(buffer_path, index=False)
-    debug_log(f"wrote reference logp column to {buffer_path}", rank=rank)
-    return buffer_df
 
 
 def train_stage_from_buffer(
@@ -617,17 +448,6 @@ def train_stage_from_buffer(
     checkpoint_callback=None,
 ):
     default_order = list(range(len(dataset)))
-    excluded_example_indices = {
-        int(part.strip())
-        for part in str(args.exclude_example_indices or "").split(",")
-        if part.strip()
-    }
-    if excluded_example_indices:
-        default_order = [idx for idx in default_order if idx not in excluded_example_indices]
-        debug_log(
-            f"[block {block_idx}] excluding example indices {sorted(excluded_example_indices)}; train_examples={len(default_order)}",
-            rank=rank,
-        )
     resume_rank_order = None
     start_epoch = 0
     resume_batch_start = 0
@@ -641,29 +461,12 @@ def train_stage_from_buffer(
             rank_order = list(resume_rank_order)
         else:
             rank_order = list(default_order)
-            if not args.disable_train_shuffle:
-                order_rng = random.Random(args.seed + block_idx * 100000 + epoch)
-                order_rng.shuffle(rank_order)
+            random.shuffle(rank_order)
         if world_size > 1:
             remainder = len(rank_order) % world_size
             if remainder:
                 rank_order.extend(rank_order[: world_size - remainder])
             rank_order = rank_order[rank::world_size]
-        order_dir = Path(args.output_dir) / "debug_logs" / "rank_orders"
-        order_dir.mkdir(parents=True, exist_ok=True)
-        with (order_dir / f"block{block_idx}_epoch{epoch}_rank{rank}.json").open("w") as handle:
-            json.dump(
-                {
-                    "block_idx": int(block_idx),
-                    "epoch": int(epoch),
-                    "rank": int(rank),
-                    "disable_train_shuffle": bool(args.disable_train_shuffle),
-                    "order_seed": None if args.disable_train_shuffle else int(args.seed + block_idx * 100000 + epoch),
-                    "rank_order": [int(value) for value in rank_order],
-                },
-                handle,
-                indent=2,
-            )
         epoch_batch_start = resume_batch_start if epoch == start_epoch and resume_rank_order is not None else 0
 
         batch_iter = range(epoch_batch_start, len(rank_order), args.batch_size)
@@ -704,7 +507,7 @@ def train_stage_from_buffer(
                     micro_rows.append(rows)
                 micro_df = pd.concat(micro_rows, ignore_index=True)
 
-                sequences, prompt_lens, attention_masks, rewards, precomputed_logp_ref = encode_buffer_group(
+                sequences, prompt_lens, attention_masks, rewards = encode_buffer_group(
                     tokenizer,
                     micro_df,
                     next(unwrap_model(model).parameters()).device,
@@ -736,42 +539,10 @@ def train_stage_from_buffer(
                     args.beta,
                     args.completions_per_prefix,
                     args.score_micro_batch_size,
-                    debug_callback=lambda message: debug_log(
-                        f"[block {block_idx}] step {step_id} loss {message}",
-                        rank=rank,
-                    ),
-                    precomputed_logp_ref=precomputed_logp_ref,
-                    before_theta_chunk_callback=(
-                        None
-                        if args.disable_active_forward_debug_dump
-                        else lambda chunk_start, chunk_end: dump_active_forward_debug(
-                            args.output_dir,
-                            block_idx,
-                            step_id,
-                            micro_start,
-                            chunk_start,
-                            chunk_end,
-                            micro_df,
-                            prompt_lens,
-                            sequences,
-                            attention_masks,
-                        )
-                    ),
                 )
                 debug_log(f"[block {block_idx}] step {step_id} loss forward end", rank=rank)
                 micro_sequences = len(micro_df)
                 debug_log(f"[block {block_idx}] step {step_id} backward begin", rank=rank)
-                if not args.disable_active_forward_debug_dump:
-                    dump_active_backward_debug(
-                        args.output_dir,
-                        block_idx,
-                        step_id,
-                        micro_start,
-                        micro_df,
-                        prompt_lens,
-                        sequences,
-                        attention_masks,
-                    )
                 (loss * (micro_sequences / total_sequences)).backward()
                 sync_cuda_if_available()
                 debug_log(f"[block {block_idx}] step {step_id} backward end", rank=rank)
@@ -906,11 +677,6 @@ def main():
     parser.add_argument("--max_train_steps", type=int, default=0)
     parser.add_argument("--disable_tqdm", action="store_true")
     parser.add_argument("--disable_micro_batch_debug_dump", action="store_true")
-    parser.add_argument("--disable_active_forward_debug_dump", action="store_true")
-    parser.add_argument("--disable_train_shuffle", action="store_true")
-    parser.add_argument("--exclude_example_indices", type=str, default="")
-    parser.add_argument("--disable_precompute_ref_logp", action="store_true")
-    parser.add_argument("--ref_logp_batch_size", type=int, default=1)
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -1033,15 +799,6 @@ def main():
             debug_log(f"[block {block_idx}] loading buffer from {buffer_path}", rank=rank)
             buffer_df = pd.read_csv(buffer_path)
             debug_log(f"[block {block_idx}] loaded {len(buffer_df)} buffered samples", rank=rank)
-            buffer_df = precompute_buffer_logp_ref(
-                model_name,
-                tokenizer,
-                buffer_df,
-                buffer_path,
-                args,
-                torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-                rank,
-            )
 
             debug_log(f"[block {block_idx}] loading train model", rank=rank)
             model = load_lora_model(
