@@ -299,6 +299,12 @@ def save_checkpoint(output_dir, model, tokenizer, optimizer, state, distributed)
 
     checkpoint_dir = Path(output_dir) / "checkpoint_latest"
     tmp_dir = Path(output_dir) / "checkpoint_latest_tmp"
+    is_rank0 = not distributed or dist.get_rank() == 0
+    if not is_rank0:
+        if distributed:
+            dist.barrier()
+        return
+
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -320,6 +326,8 @@ def save_checkpoint(output_dir, model, tokenizer, optimizer, state, distributed)
     if checkpoint_dir.exists():
         shutil.rmtree(checkpoint_dir)
     tmp_dir.rename(checkpoint_dir)
+    if distributed:
+        dist.barrier()
 
 
 def move_optimizer_state_to_device(optimizer, device):

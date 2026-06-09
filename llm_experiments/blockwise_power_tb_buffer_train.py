@@ -12,6 +12,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 import transformers
 from tqdm import tqdm
 
@@ -50,6 +52,34 @@ def clear_cuda():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
+
+
+def init_distributed_from_env():
+    world_size = int(os.environ.get("WORLD_SIZE", "1") or 1)
+    if world_size <= 1:
+        device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        return 0, 0, 1, device, False
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("DDP training requires CUDA devices.")
+
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    return rank, local_rank, world_size, torch.device(f"cuda:{local_rank}"), True
+
+
+def cleanup_distributed(distributed):
+    if distributed and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def reduce_metric_values(values, device, distributed):
+    tensor = torch.tensor(values, dtype=torch.float64, device=device)
+    if distributed:
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    return tensor.detach().cpu().tolist()
 
 
 def setup_debug_file(output_dir, name, dump_timeout_seconds=0):
@@ -463,7 +493,8 @@ def train_stage_from_buffer(
             rank_order = list(resume_rank_order)
         else:
             rank_order = list(default_order)
-            random.shuffle(rank_order)
+            order_rng = random.Random(args.seed + block_idx * 100000 + epoch)
+            order_rng.shuffle(rank_order)
         if world_size > 1:
             remainder = len(rank_order) % world_size
             if remainder:
@@ -472,7 +503,7 @@ def train_stage_from_buffer(
         epoch_batch_start = resume_batch_start if epoch == start_epoch and resume_rank_order is not None else 0
 
         batch_iter = range(epoch_batch_start, len(rank_order), args.batch_size)
-        if not args.disable_tqdm:
+        if rank == 0 and not args.disable_tqdm:
             batch_iter = tqdm(batch_iter, desc=f"block {block_idx} epoch {epoch}")
         for start in batch_iter:
             batch_indices = rank_order[start:start + args.batch_size]
@@ -514,7 +545,7 @@ def train_stage_from_buffer(
                     micro_df,
                     next(unwrap_model(model).parameters()).device,
                 )
-                if not args.disable_micro_batch_debug_dump:
+                if rank == 0 and not args.disable_micro_batch_debug_dump:
                     dump_micro_batch_debug(
                         args.output_dir,
                         block_idx,
@@ -554,7 +585,7 @@ def train_stage_from_buffer(
                 logp_theta_sum += float(logp_theta.sum().cpu())
                 logp_ref_sum += float(logp_ref.sum().cpu())
 
-                if args.save_samples:
+                if rank == 0 and args.save_samples:
                     for row_idx, row in micro_df.iterrows():
                         completion_len = int(
                             completion_end(
@@ -590,23 +621,30 @@ def train_stage_from_buffer(
             optimizer.step()
             debug_log(f"[block {block_idx}] step {step_id} optimizer step end", rank=rank)
             global_step = step_id
-            record = {
-                "step": global_step,
-                "epoch": epoch,
-                "block_idx": block_idx,
-                "rank": rank,
-                "loss": loss_sum / total_sequences,
-                "reward_mean": reward_sum / total_sequences,
-                "logp_theta_mean": logp_theta_sum / total_sequences,
-                "logp_ref_mean": logp_ref_sum / total_sequences,
-            }
-            metrics.append(record)
-            print(record, flush=True)
-            if wandb_run is not None and should_log_wandb_step(args, global_step):
-                debug_log(f"[block {block_idx}] wandb step log begin step={global_step}", rank=rank)
-                wandb_run.log(record, step=global_step)
-                debug_log(f"[block {block_idx}] wandb step log end step={global_step}", rank=rank)
-            if checkpoint_callback is not None and args.save_every_steps and global_step % args.save_every_steps == 0:
+            reduced_loss_sum, reduced_reward_sum, reduced_logp_theta_sum, reduced_logp_ref_sum, reduced_total_sequences = reduce_metric_values(
+                [loss_sum, reward_sum, logp_theta_sum, logp_ref_sum, total_sequences],
+                next(unwrap_model(model).parameters()).device,
+                world_size > 1,
+            )
+            if rank == 0:
+                record = {
+                    "step": global_step,
+                    "epoch": epoch,
+                    "block_idx": block_idx,
+                    "rank": rank,
+                    "world_size": world_size,
+                    "loss": reduced_loss_sum / reduced_total_sequences,
+                    "reward_mean": reduced_reward_sum / reduced_total_sequences,
+                    "logp_theta_mean": reduced_logp_theta_sum / reduced_total_sequences,
+                    "logp_ref_mean": reduced_logp_ref_sum / reduced_total_sequences,
+                }
+                metrics.append(record)
+                print(record, flush=True)
+                if wandb_run is not None and should_log_wandb_step(args, global_step):
+                    debug_log(f"[block {block_idx}] wandb step log begin step={global_step}", rank=rank)
+                    wandb_run.log(record, step=global_step)
+                    debug_log(f"[block {block_idx}] wandb step log end step={global_step}", rank=rank)
+            if rank == 0 and checkpoint_callback is not None and args.save_every_steps and global_step % args.save_every_steps == 0:
                 checkpoint_callback(
                     current_block_idx=block_idx,
                     global_step=global_step,
@@ -691,14 +729,17 @@ def main():
     debug_log(f"pre-init env CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} LOCAL_RANK={os.environ.get('LOCAL_RANK')} RANK={os.environ.get('RANK')} WORLD_SIZE={os.environ.get('WORLD_SIZE')}")
 
     try:
-        rank = 0
-        world_size = 1
-        distributed_device = None
+        rank, local_rank, world_size, distributed_device, distributed = init_distributed_from_env()
+        if distributed and args.save_every_steps:
+            raise ValueError("--save_every_steps mid-block checkpointing is not supported with DDP training yet.")
         close_debug_file()
-        debug_path = setup_debug_file(output_dir, "trainer.log", args.debug_dump_timeout_seconds)
-        debug_log("single-process init complete", rank=rank)
+        debug_path = setup_debug_file(output_dir, f"trainer_rank{rank}.log", args.debug_dump_timeout_seconds)
         debug_log(
-            f"post-init env CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} LOCAL_RANK=0 RANK=0 WORLD_SIZE=1",
+            f"{'distributed' if distributed else 'single-process'} init complete local_rank={local_rank} world_size={world_size}",
+            rank=rank,
+        )
+        debug_log(
+            f"post-init env CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} LOCAL_RANK={local_rank} RANK={rank} WORLD_SIZE={world_size}",
             rank=rank,
         )
         seed_everything(args.seed + rank)
@@ -757,6 +798,10 @@ def main():
             if not args.resume_from_checkpoint:
                 raise ValueError("--eval_only requires --resume_from_checkpoint")
             debug_log("[eval-only] loading model from checkpoint adapter", rank=rank)
+            if distributed and rank != 0:
+                if dist.is_initialized():
+                    dist.barrier()
+                return
             if args.eval_backend == "vllm":
                 eval_metrics = evaluate_model_with_vllm(
                     model_name,
@@ -791,12 +836,17 @@ def main():
             log_point("[eval-only] eval outputs written", rank=rank)
             if wandb_run is not None:
                 wandb_run.finish()
+            if distributed and dist.is_initialized():
+                dist.barrier()
             return
 
         for block_idx in range(start_block_idx, args.num_blocks + 1):
             stage_adapter_path = adapter_path
             if not args.skip_buffer_sampling:
-                generate_stage_buffer_subprocess(block_idx, args, stage_adapter_path)
+                if rank == 0:
+                    generate_stage_buffer_subprocess(block_idx, args, stage_adapter_path)
+                if distributed:
+                    dist.barrier()
             log_point(f"[block {block_idx}] sampler finished; entering training setup", rank=rank)
 
             buffer_path = output_dir / "buffers" / f"block_{block_idx}.csv"
@@ -817,6 +867,8 @@ def main():
             if args.gradient_checkpointing:
                 enable_gradient_checkpointing(model)
             model.train()
+            if distributed:
+                model = DDP(model, device_ids=[local_rank], output_device=local_rank)
             optimizer = torch.optim.AdamW(
                 [param for param in model.parameters() if param.requires_grad],
                 lr=args.lr,
@@ -868,11 +920,14 @@ def main():
 
             if args.save_every_block:
                 block_dir = output_dir / f"block_{block_idx}"
-                unwrap_model(model).save_pretrained(block_dir)
-                tokenizer.save_pretrained(block_dir)
-                log_point(f"[block {block_idx}] saved block checkpoint", rank=rank)
+                if rank == 0:
+                    unwrap_model(model).save_pretrained(block_dir)
+                    tokenizer.save_pretrained(block_dir)
+                    log_point(f"[block {block_idx}] saved block checkpoint", rank=rank)
+                if distributed:
+                    dist.barrier()
 
-            if args.eval_every_block:
+            if rank == 0 and args.eval_every_block:
                 debug_log(f"[block {block_idx}] starting eval on {len(eval_rows)} examples", rank=rank)
                 if args.eval_backend == "vllm":
                     eval_metrics = evaluate_model_with_vllm(
@@ -891,6 +946,8 @@ def main():
                     debug_log(f"[block {block_idx}] wandb eval log begin", rank=rank)
                     wandb_run.log(eval_metrics, step=global_step)
                     debug_log(f"[block {block_idx}] wandb eval log end", rank=rank)
+            if distributed:
+                dist.barrier()
 
             checkpoint_state = build_checkpoint_state(
                 args,
@@ -898,21 +955,23 @@ def main():
                 global_step=global_step,
                 next_block_idx=block_idx + 1,
             )
-            save_checkpoint(output_dir, model, tokenizer, optimizer, checkpoint_state, distributed=False)
+            save_checkpoint(output_dir, model, tokenizer, optimizer, checkpoint_state, distributed=distributed)
             adapter_path = output_dir / "checkpoint_latest" / "adapter"
-            log_point(f"[block {block_idx}] checkpoint_latest updated", rank=rank)
+            if rank == 0:
+                log_point(f"[block {block_idx}] checkpoint_latest updated", rank=rank)
 
             del model
             del optimizer
             clear_cuda()
 
-        pd.DataFrame(metrics).to_csv(output_dir / "metrics.csv", index=False)
-        if args.save_samples:
-            pd.DataFrame(sample_records).to_csv(output_dir / "samples.csv", index=False)
-        if eval_records:
-            pd.DataFrame(eval_records).to_csv(output_dir / "eval_metrics.csv", index=False)
+        if rank == 0:
+            pd.DataFrame(metrics).to_csv(output_dir / "metrics.csv", index=False)
+            if args.save_samples:
+                pd.DataFrame(sample_records).to_csv(output_dir / "samples.csv", index=False)
+            if eval_records:
+                pd.DataFrame(eval_records).to_csv(output_dir / "eval_metrics.csv", index=False)
 
-        log_point("[final] outputs written", rank=rank)
+            log_point("[final] outputs written", rank=rank)
 
         if wandb_run is not None:
             wandb_run.finish()
@@ -922,6 +981,7 @@ def main():
         raise
     finally:
         close_debug_file()
+        cleanup_distributed("distributed" in locals() and distributed)
 
 
 if __name__ == "__main__":

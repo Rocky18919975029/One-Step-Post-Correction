@@ -148,7 +148,7 @@ def build_sampler_command(args, block_idx, output_dir):
 
 
 def build_train_command(args, block_idx, output_dir):
-    command = [
+    trainer_args = [
         sys.executable,
         "blockwise_power_tb_buffer_train.py",
         "--data_path",
@@ -192,35 +192,52 @@ def build_train_command(args, block_idx, output_dir):
         str(args.debug_dump_timeout_seconds),
     ]
     if args.gradient_checkpointing:
-        command.append("--gradient_checkpointing")
+        trainer_args.append("--gradient_checkpointing")
     if args.quiet_debug_logs:
-        command.append("--quiet_debug_logs")
+        trainer_args.append("--quiet_debug_logs")
     if args.save_samples:
-        command.append("--save_samples")
+        trainer_args.append("--save_samples")
     if args.save_every_block:
-        command.append("--save_every_block")
+        trainer_args.append("--save_every_block")
     if args.score_micro_batch_size is not None:
-        command.extend(["--score_micro_batch_size", str(args.score_micro_batch_size)])
+        trainer_args.extend(["--score_micro_batch_size", str(args.score_micro_batch_size)])
     if args.save_every_steps:
-        command.extend(["--save_every_steps", str(args.save_every_steps)])
+        trainer_args.extend(["--save_every_steps", str(args.save_every_steps)])
     if args.use_wandb:
-        command.append("--use_wandb")
+        trainer_args.append("--use_wandb")
     if args.wandb_project is not None:
-        command.extend(["--wandb_project", args.wandb_project])
+        trainer_args.extend(["--wandb_project", args.wandb_project])
     if args.wandb_entity is not None:
-        command.extend(["--wandb_entity", args.wandb_entity])
+        trainer_args.extend(["--wandb_entity", args.wandb_entity])
     if args.wandb_run_name is not None:
-        command.extend(["--wandb_run_name", args.wandb_run_name])
+        trainer_args.extend(["--wandb_run_name", args.wandb_run_name])
     if args.wandb_id is not None:
-        command.extend(["--wandb_id", args.wandb_id])
+        trainer_args.extend(["--wandb_id", args.wandb_id])
     if args.wandb_resume is not None:
-        command.extend(["--wandb_resume", args.wandb_resume])
+        trainer_args.extend(["--wandb_resume", args.wandb_resume])
     if args.wandb_log_every is not None:
-        command.extend(["--wandb_log_every", str(args.wandb_log_every)])
+        trainer_args.extend(["--wandb_log_every", str(args.wandb_log_every)])
     ckpt_dir = checkpoint_dir(output_dir)
     if ckpt_dir.exists():
-        command.extend(["--resume_from_checkpoint", str(ckpt_dir)])
-    return command
+        trainer_args.extend(["--resume_from_checkpoint", str(ckpt_dir)])
+
+    if not args.ddp_train:
+        return trainer_args
+
+    nproc = len(parse_gpu_list(args.train_gpus))
+    if nproc < 2:
+        raise ValueError("--ddp_train requires at least two --train_gpus entries.")
+    return [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        "--nnodes",
+        "1",
+        "--nproc_per_node",
+        str(nproc),
+        *trainer_args[1:],
+    ]
 
 
 def build_eval_command(args, output_dir):
@@ -304,9 +321,11 @@ def fill_defaults(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run the maintained single-GPU blockwise buffer pipeline with visible per-step progress."
+        description="Run the maintained blockwise buffer pipeline with optional DDP training and visible per-step progress."
     )
     parser.add_argument("--gpu", type=str, default="0")
+    parser.add_argument("--train_gpus", type=str, default=None)
+    parser.add_argument("--ddp_train", action="store_true")
     parser.add_argument("--sampler_gpus", type=str, default=None)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--output_dir", type=str, default="results/blockwise_buffer_pipeline")
@@ -367,6 +386,12 @@ def main():
 
     if args.sampler_gpus is None:
         args.sampler_gpus = args.gpu
+    if args.train_gpus is None:
+        args.train_gpus = args.gpu
+    if args.ddp_train and len(parse_gpu_list(args.train_gpus)) < 2:
+        raise ValueError("--ddp_train requires --train_gpus with at least two GPUs, e.g. --train_gpus 0,1.")
+    if args.ddp_train and args.save_every_steps:
+        raise ValueError("--save_every_steps is not supported with --ddp_train yet; use --save_every_block.")
 
     base_env = os.environ.copy()
     base_env["PYTHONUNBUFFERED"] = "1"
@@ -379,7 +404,7 @@ def main():
         sampler_env.setdefault("NCCL_P2P_DISABLE", "1")
 
     train_env = base_env.copy()
-    train_env["CUDA_VISIBLE_DEVICES"] = args.gpu
+    train_env["CUDA_VISIBLE_DEVICES"] = args.train_gpus
 
     start_block = read_next_block_idx(output_dir)
     if start_block > args.num_blocks:

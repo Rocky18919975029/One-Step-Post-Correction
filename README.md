@@ -29,7 +29,7 @@ This is an **offline-buffered** implementation:
 - stage buffers are written to disk as CSV files
 - training then consumes those saved buffers
 
-The implementation is single-GPU for training, and can shard sampling across multiple GPUs.
+The implementation defaults to single-GPU training, can optionally use DDP for multi-GPU training, and can shard sampling across multiple GPUs.
 
 ## Current Algorithm
 
@@ -294,6 +294,52 @@ This configuration means:
 - stage buffers are reused on resume if they are complete
 - final evaluation runs from the latest checkpoint
 
+To train with DDP on multiple GPUs, add `--ddp_train` and set `--train_gpus`:
+
+```bash
+cd llm_experiments
+
+python run_blockwise_buffer_pipeline.py \
+  --gpu 0 \
+  --train_gpus 0,1,2,3 \
+  --sampler_gpus 0,1,2,3 \
+  --ddp_train \
+  --output_dir results/blockwise_buffer_mini500_qwen_seed0_ddp \
+  --data_path ../data/mini_train.parquet \
+  --eval_data_path data/MATH500.json \
+  --model qwen \
+  --max_examples 500 \
+  --batch_size 4 \
+  --micro_batch_size 1 \
+  --score_micro_batch_size 1 \
+  --epochs 1 \
+  --num_blocks 4 \
+  --block_size 192 \
+  --completions_per_prefix 4 \
+  --future_completions_per_partial 4 \
+  --max_completion_tokens 3072 \
+  --temperature 0.25 \
+  --alpha 4.0 \
+  --beta 1.0 \
+  --lr 1e-5 \
+  --seed 0 \
+  --gradient_checkpointing \
+  --save_samples \
+  --save_every_block \
+  --eval_backend vllm \
+  --eval_examples 100 \
+  --eval_max_new_tokens 3072 \
+  --vllm_dtype bfloat16 \
+  --vllm_gpu_memory_utilization 0.9 \
+  --vllm_max_model_len 4096 \
+  --vllm_batch_size 32 \
+  --vllm_enforce_eager \
+  --use_wandb \
+  --wandb_project one-step-post-correction \
+  --wandb_run_name mini500-qwen-seed0-ddp \
+  --quiet_debug_logs
+```
+
 ### Small smoke test
 
 ```bash
@@ -330,6 +376,8 @@ so training can restart from inside a block rather than repeating the whole bloc
 - `future_completions_per_partial`: number of future rollouts used to estimate the binary stage reward
 - `vllm_batch_size`: vLLM prompt batch size during sampling/eval
 - `sampler_gpus`: GPUs used for sharded vLLM sampling
+- `train_gpus`: GPUs used by the trainer; defaults to `gpu`
+- `ddp_train`: launch the trainer with `torchrun` over all `train_gpus`
 
 ### Training
 
@@ -341,6 +389,7 @@ Practical interpretation:
 
 - `micro_batch_size` mainly affects training memory and throughput
 - `score_micro_batch_size` mainly affects inner loss-scoring memory and throughput
+- under DDP, `batch_size` is per rank, so global effective prompt batch size is `batch_size * number_of_train_gpus`
 
 ### Logging
 
@@ -353,12 +402,15 @@ Current default behavior is conservative: step-level wandb logging is disabled b
 
 ## Current Design Choices
 
-### Single-GPU training
+### Training
 
-The maintained trainer is single-GPU. This is deliberate. Earlier distributed training routes were unstable enough that the maintained path now prefers:
+The maintained trainer defaults to single-GPU for reliability and can be launched in DDP mode when multiple training GPUs are available:
 
-- multi-GPU sampling when helpful
-- single-GPU training for reliability
+- single-GPU training is the default path
+- DDP training is enabled with `--ddp_train --train_gpus 0,1,...`
+- rank 0 writes checkpoints, metrics, eval outputs, and sample dumps
+- each DDP rank writes its own debug log under `debug_logs/trainer_rank*.log`
+- mid-block checkpointing with `save_every_steps` is not supported in DDP yet; use `save_every_block`
 
 ### Multi-GPU sampling is sharded, not tensor-parallel
 
