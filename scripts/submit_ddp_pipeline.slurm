@@ -27,6 +27,7 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-/data/user/zhongal/One-Step-Post-Correction}"
 CONDA_ENV="${CONDA_ENV:-psamp}"
 CONDA_ENV_PATH="${CONDA_ENV_PATH:-/data/user/zhongal/.conda/envs/psamp}"
+PYTHON_BIN="${PYTHON_BIN:-$CONDA_ENV_PATH/bin/python}"
 CONDA_SH="${CONDA_SH:-}"
 HF_HOME="${HF_HOME:-/data/user/zhongal/.cache/huggingface}"
 TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
@@ -92,6 +93,13 @@ else
   conda activate "$CONDA_ENV"
 fi
 
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "Missing Python executable: $PYTHON_BIN" >&2
+  exit 1
+fi
+export PATH="$(dirname "$PYTHON_BIN"):$PATH"
+hash -r
+
 cd "$REPO_DIR/llm_experiments"
 
 export PYTHONUNBUFFERED=1
@@ -105,8 +113,8 @@ export TRANSFORMERS_OFFLINE
 export WANDB_MODE
 export WANDB_DISABLED
 
-echo "Python executable: $(command -v python)"
-python - <<'PY'
+echo "Python executable: $PYTHON_BIN"
+"$PYTHON_BIN" - <<'PY'
 import torch
 import vllm
 
@@ -115,7 +123,7 @@ print(f"vllm={vllm.__version__}", flush=True)
 PY
 
 cmd=(
-  python run_blockwise_buffer_pipeline.py
+  "$PYTHON_BIN" run_blockwise_buffer_pipeline.py
   --gpu 0
   --train_gpus "$TRAIN_GPUS"
   --sampler_gpus "$SAMPLER_GPUS"
