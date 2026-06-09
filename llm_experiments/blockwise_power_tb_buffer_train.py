@@ -27,6 +27,8 @@ from blockwise_power_tb_train import (
     load_lora_model,
     load_math_dataset,
     maybe_init_wandb,
+    resolve_model_name,
+    resolve_prompt_model_key,
     save_checkpoint,
     score_completion,
     seed_everything,
@@ -207,7 +209,8 @@ def evaluate_model_with_vllm(model_name, tokenizer, eval_rows, args, adapter_pat
     if not eval_rows:
         return {}
 
-    prompts = [format_prompt(row["prompt"], args.model, tokenizer, cot=True) for row in eval_rows]
+    prompt_model = resolve_prompt_model_key(args.model, getattr(args, "prompt_model", None))
+    prompts = [format_prompt(row["prompt"], prompt_model, tokenizer, cot=True) for row in eval_rows]
     llm, sampling_params_cls, lora_request = load_vllm(model_name, args, adapter_path)
     try:
         sampling_kwargs = {
@@ -251,7 +254,8 @@ def generate_stage_buffer(
     example_idx_offset=0,
     buffer_path_override=None,
 ):
-    prompts = [format_prompt(row["prompt"], args.model, tokenizer, cot=True) for row in dataset]
+    prompt_model = resolve_prompt_model_key(args.model, getattr(args, "prompt_model", None))
+    prompts = [format_prompt(row["prompt"], prompt_model, tokenizer, cot=True) for row in dataset]
     stage_token_limit = partial_completion_token_limit(block_idx, args)
     future_completions_per_partial = (
         args.future_completions_per_partial
@@ -682,7 +686,8 @@ def main():
     parser.add_argument("--data_path", type=str, default="data/MATH500.json")
     parser.add_argument("--eval_data_path", type=str, default="data/MATH500.json")
     parser.add_argument("--output_dir", type=str, default="results/blockwise_tb_buffer")
-    parser.add_argument("--model", type=str, default="qwen", choices=sorted(MODEL_NAME_BY_KEY))
+    parser.add_argument("--model", type=str, default="qwen")
+    parser.add_argument("--prompt_model", type=str, default=None, choices=sorted(MODEL_NAME_BY_KEY))
     parser.add_argument("--max_examples", type=int, default=32)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--micro_batch_size", type=int, default=1)
@@ -767,7 +772,9 @@ def main():
         dataset = load_math_dataset(args.data_path)[: args.max_examples]
         eval_rows = load_math_dataset(args.eval_data_path)[: args.eval_examples] if args.eval_every_block else []
         debug_log(f"loaded datasets train={len(dataset)} eval={len(eval_rows)}", rank=rank)
-        model_name = MODEL_NAME_BY_KEY[args.model]
+        model_name = resolve_model_name(args.model)
+        prompt_model = resolve_prompt_model_key(args.model, args.prompt_model)
+        debug_log(f"resolved model_name={model_name} prompt_model={prompt_model}", rank=rank)
         debug_log(f"loading tokenizer for {model_name}", rank=rank)
         tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         if tokenizer.pad_token_id is None:

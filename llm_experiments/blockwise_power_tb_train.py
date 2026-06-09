@@ -28,6 +28,18 @@ MODEL_NAME_BY_KEY = {
 }
 
 
+def resolve_model_name(model):
+    return MODEL_NAME_BY_KEY.get(model, model)
+
+
+def resolve_prompt_model_key(model, prompt_model=None):
+    if prompt_model is not None:
+        return prompt_model
+    if model in MODEL_NAME_BY_KEY:
+        return model
+    return "qwen"
+
+
 def seed_everything(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -423,7 +435,8 @@ def evaluate_model(model, tokenizer, eval_rows, args):
         raw_model.config.use_cache = True
     try:
         for row in tqdm(eval_rows, desc="eval", leave=False):
-            prompt = format_prompt(row["prompt"], args.model, tokenizer, cot=True)
+            prompt_model = resolve_prompt_model_key(args.model, getattr(args, "prompt_model", None))
+            prompt = format_prompt(row["prompt"], prompt_model, tokenizer, cot=True)
             input_ids = tokenizer.encode(prompt, return_tensors="pt").to(first_model_device(raw_model))
             attention_mask = torch.ones_like(input_ids)
             generate_kwargs = {

@@ -11,7 +11,7 @@ import pandas as pd
 import transformers
 
 from blockwise_power_tb_buffer_train import generate_stage_buffer
-from blockwise_power_tb_train import MODEL_NAME_BY_KEY, load_math_dataset
+from blockwise_power_tb_train import MODEL_NAME_BY_KEY, load_math_dataset, resolve_model_name, resolve_prompt_model_key
 
 
 def debug_log(output_dir, message):
@@ -92,6 +92,8 @@ def build_worker_command(args, start_idx, end_idx, output_path):
         str(output_path),
         "--worker_mode",
     ]
+    if args.prompt_model is not None:
+        command.extend(["--prompt_model", args.prompt_model])
     if args.adapter_path:
         command.extend(["--adapter_path", args.adapter_path])
     if args.vllm_enforce_eager:
@@ -168,7 +170,8 @@ def main():
     parser = argparse.ArgumentParser(description="Sample one block-wise TB buffer with vLLM.")
     parser.add_argument("--data_path", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
-    parser.add_argument("--model", type=str, required=True, choices=sorted(MODEL_NAME_BY_KEY))
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--prompt_model", type=str, default=None, choices=sorted(MODEL_NAME_BY_KEY))
     parser.add_argument("--block_idx", type=int, required=True)
     parser.add_argument("--adapter_path", type=str, default=None)
     parser.add_argument("--max_examples", type=int, default=32)
@@ -199,7 +202,8 @@ def main():
         debug_log(args.output_dir, f"sampler finished block_idx={args.block_idx}")
         return
 
-    model_name = MODEL_NAME_BY_KEY[args.model]
+    model_name = resolve_model_name(args.model)
+    args.prompt_model = resolve_prompt_model_key(args.model, args.prompt_model)
     debug_log(args.output_dir, f"loading dataset from {args.data_path}")
     dataset = load_math_dataset(args.data_path)[: args.max_examples]
     example_end = len(dataset) if args.example_end is None else min(args.example_end, len(dataset))

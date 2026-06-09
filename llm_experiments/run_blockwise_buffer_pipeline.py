@@ -137,6 +137,8 @@ def build_sampler_command(args, block_idx, output_dir):
         "--vllm_batch_size",
         str(args.vllm_batch_size),
     ]
+    if args.prompt_model is not None:
+        command.extend(["--prompt_model", args.prompt_model])
     adapter_dir = checkpoint_adapter_dir(output_dir)
     if block_idx > 1 and adapter_dir.exists():
         command.extend(["--adapter_path", str(adapter_dir)])
@@ -191,6 +193,8 @@ def build_train_command(args, block_idx, output_dir):
         "--debug_dump_timeout_seconds",
         str(args.debug_dump_timeout_seconds),
     ]
+    if args.prompt_model is not None:
+        trainer_args.extend(["--prompt_model", args.prompt_model])
     if args.gradient_checkpointing:
         trainer_args.append("--gradient_checkpointing")
     if args.quiet_debug_logs:
@@ -270,6 +274,8 @@ def build_eval_command(args, output_dir):
         "--debug_dump_timeout_seconds",
         str(args.debug_dump_timeout_seconds),
     ]
+    if args.prompt_model is not None:
+        command.extend(["--prompt_model", args.prompt_model])
     if args.vllm_enforce_eager:
         command.append("--vllm_enforce_eager")
     if args.eval_do_sample:
@@ -337,6 +343,7 @@ def main():
     parser.add_argument("--data_path", type=str, default="../data/train.parquet")
     parser.add_argument("--eval_data_path", type=str, default="data/MATH500.json")
     parser.add_argument("--model", type=str, default="qwen")
+    parser.add_argument("--prompt_model", type=str, default=None, choices=["phi", "qwen", "qwen_math", "qwen_math_grpo", "tulu"])
     parser.add_argument("--max_examples", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--micro_batch_size", type=int, default=1)
