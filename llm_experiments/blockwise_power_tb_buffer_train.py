@@ -166,6 +166,51 @@ def dump_active_forward_debug(
         json.dump(meta, handle, indent=2)
 
 
+def dump_active_backward_debug(
+    output_dir,
+    block_idx,
+    step_id,
+    micro_start,
+    micro_df,
+    prompt_lens,
+    sequences,
+    attention_masks,
+):
+    debug_dir = Path(output_dir) / "debug_logs" / "active_backward"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    cpu_sequences = sequences.detach().cpu()
+    cpu_attention = attention_masks.detach().cpu()
+    meta = {
+        "block_idx": int(block_idx),
+        "step": int(step_id),
+        "micro_start": int(micro_start),
+        "rows": int(len(micro_df)),
+        "seq_shape": [int(value) for value in cpu_sequences.shape],
+        "prompt_lens": [int(value) for value in prompt_lens],
+        "attention_sums": [int(value) for value in cpu_attention.sum(dim=1).tolist()],
+        "input_id_min": int(cpu_sequences.min().item()) if cpu_sequences.numel() else None,
+        "input_id_max": int(cpu_sequences.max().item()) if cpu_sequences.numel() else None,
+        "example_indices": [int(value) for value in micro_df["example_idx"].tolist()] if "example_idx" in micro_df else [],
+        "sample_indices": [int(value) for value in micro_df["sample_idx"].tolist()] if "sample_idx" in micro_df else [],
+    }
+    micro_df.to_csv(debug_dir / "active_backward.csv", index=False)
+    torch.save(
+        {
+            "meta": meta,
+            "input_ids": cpu_sequences,
+            "attention_mask": cpu_attention,
+        },
+        debug_dir / "active_backward.pt",
+    )
+    with (debug_dir / "active_backward.json").open("w") as handle:
+        json.dump(meta, handle, indent=2)
+
+    stem = f"block{block_idx}_step{step_id}_micro{micro_start}"
+    micro_df.to_csv(debug_dir / f"{stem}.csv", index=False)
+    with (debug_dir / f"{stem}.json").open("w") as handle:
+        json.dump(meta, handle, indent=2)
+
+
 def load_vllm(model_name, args, adapter_path=None):
     try:
         from vllm import LLM, SamplingParams
@@ -572,6 +617,17 @@ def train_stage_from_buffer(
     checkpoint_callback=None,
 ):
     default_order = list(range(len(dataset)))
+    excluded_example_indices = {
+        int(part.strip())
+        for part in str(args.exclude_example_indices or "").split(",")
+        if part.strip()
+    }
+    if excluded_example_indices:
+        default_order = [idx for idx in default_order if idx not in excluded_example_indices]
+        debug_log(
+            f"[block {block_idx}] excluding example indices {sorted(excluded_example_indices)}; train_examples={len(default_order)}",
+            rank=rank,
+        )
     resume_rank_order = None
     start_epoch = 0
     resume_batch_start = 0
@@ -705,6 +761,17 @@ def train_stage_from_buffer(
                 debug_log(f"[block {block_idx}] step {step_id} loss forward end", rank=rank)
                 micro_sequences = len(micro_df)
                 debug_log(f"[block {block_idx}] step {step_id} backward begin", rank=rank)
+                if not args.disable_active_forward_debug_dump:
+                    dump_active_backward_debug(
+                        args.output_dir,
+                        block_idx,
+                        step_id,
+                        micro_start,
+                        micro_df,
+                        prompt_lens,
+                        sequences,
+                        attention_masks,
+                    )
                 (loss * (micro_sequences / total_sequences)).backward()
                 debug_log(f"[block {block_idx}] step {step_id} backward end", rank=rank)
 
@@ -840,6 +907,7 @@ def main():
     parser.add_argument("--disable_micro_batch_debug_dump", action="store_true")
     parser.add_argument("--disable_active_forward_debug_dump", action="store_true")
     parser.add_argument("--disable_train_shuffle", action="store_true")
+    parser.add_argument("--exclude_example_indices", type=str, default="")
     parser.add_argument("--disable_precompute_ref_logp", action="store_true")
     parser.add_argument("--ref_logp_batch_size", type=int, default=1)
     args = parser.parse_args()
