@@ -26,6 +26,7 @@ set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-/data/user/zhongal/One-Step-Post-Correction}"
 CONDA_ENV="${CONDA_ENV:-psamp}"
+CONDA_ENV_PATH="${CONDA_ENV_PATH:-/data/user/zhongal/.conda/envs/psamp}"
 CONDA_SH="${CONDA_SH:-}"
 HF_HOME="${HF_HOME:-/data/user/zhongal/.cache/huggingface}"
 TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
@@ -85,7 +86,11 @@ if [[ -z "$CONDA_SH" ]]; then
 fi
 # shellcheck source=/dev/null
 source "$CONDA_SH"
-conda activate "$CONDA_ENV"
+if [[ -d "$CONDA_ENV_PATH" ]]; then
+  conda activate "$CONDA_ENV_PATH"
+else
+  conda activate "$CONDA_ENV"
+fi
 
 cd "$REPO_DIR/llm_experiments"
 
@@ -99,6 +104,15 @@ export HF_HUB_OFFLINE
 export TRANSFORMERS_OFFLINE
 export WANDB_MODE
 export WANDB_DISABLED
+
+echo "Python executable: $(command -v python)"
+python - <<'PY'
+import torch
+import vllm
+
+print(f"torch={torch.__version__}", flush=True)
+print(f"vllm={vllm.__version__}", flush=True)
+PY
 
 cmd=(
   python run_blockwise_buffer_pipeline.py
