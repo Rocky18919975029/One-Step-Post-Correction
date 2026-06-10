@@ -160,6 +160,32 @@ def load_lora_model(model_name, torch_dtype, device=None, adapter_path=None, att
     return model
 
 
+def load_reference_model(model_name, torch_dtype, device=None, attn_implementation=None):
+    if device is None:
+        if torch.cuda.is_available():
+            device = torch.device("cuda:0")
+        else:
+            device = torch.device("cpu")
+
+    model_kwargs = {
+        "torch_dtype": parse_torch_dtype(torch_dtype),
+        "trust_remote_code": True,
+    }
+    if attn_implementation is not None:
+        model_kwargs["attn_implementation"] = attn_implementation
+
+    model = transformers.AutoModelForCausalLM.from_pretrained(
+        model_name,
+        **model_kwargs,
+    ).to(device)
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad_(False)
+    if hasattr(model, "config"):
+        model.config.use_cache = False
+    return model
+
+
 def first_model_device(model):
     model = unwrap_model(model)
     if hasattr(model, "hf_device_map"):
@@ -262,16 +288,20 @@ def vargrad_tb_loss(
     beta,
     num_return_sequences,
     score_micro_batch_size=None,
+    ref_model=None,
 ):
     raw_model = unwrap_model(model)
-    if not hasattr(raw_model, "disable_adapter"):
+    if ref_model is None and not hasattr(raw_model, "disable_adapter"):
         raise RuntimeError("Reference logprob requires a PEFT LoRA model with disable_adapter().")
 
     if score_micro_batch_size is None or score_micro_batch_size >= sequences.shape[0]:
         logp_theta = completion_logprob(model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
         with torch.no_grad():
-            with raw_model.disable_adapter():
-                logp_ref = completion_logprob(raw_model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
+            if ref_model is not None:
+                logp_ref = completion_logprob(ref_model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
+            else:
+                with raw_model.disable_adapter():
+                    logp_ref = completion_logprob(raw_model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
 
         log_reward_augmented_target = alpha * logp_ref + rewards / beta
         log_z_terms = alpha * logp_ref - logp_theta.detach() + rewards / beta
@@ -287,15 +317,25 @@ def vargrad_tb_loss(
 
     score_micro_batch_size = max(1, int(score_micro_batch_size))
     with torch.no_grad():
-        with raw_model.disable_adapter():
+        if ref_model is not None:
             logp_ref = completion_logprob_chunks(
-                raw_model,
+                ref_model,
                 sequences,
                 prompt_lens,
                 attention_masks,
                 tokenizer.eos_token_id,
                 score_micro_batch_size,
             ).detach()
+        else:
+            with raw_model.disable_adapter():
+                logp_ref = completion_logprob_chunks(
+                    raw_model,
+                    sequences,
+                    prompt_lens,
+                    attention_masks,
+                    tokenizer.eos_token_id,
+                    score_micro_batch_size,
+                ).detach()
 
     logp_theta_chunks = []
     for start in range(0, sequences.shape[0], score_micro_batch_size):
@@ -333,9 +373,10 @@ def vargrad_tb_loss_with_score_chunk_backward(
     score_micro_batch_size,
     loss_scale,
     active_callback=None,
+    ref_model=None,
 ):
     raw_model = unwrap_model(model)
-    if not hasattr(raw_model, "disable_adapter"):
+    if ref_model is None and not hasattr(raw_model, "disable_adapter"):
         raise RuntimeError("Reference logprob requires a PEFT LoRA model with disable_adapter().")
 
     row_count = int(sequences.shape[0])
@@ -348,15 +389,25 @@ def vargrad_tb_loss_with_score_chunk_backward(
     if active_callback is not None:
         active_callback("ref_forward", 0, row_count)
     with torch.no_grad():
-        with raw_model.disable_adapter():
+        if ref_model is not None:
             logp_ref = completion_logprob_chunks(
-                raw_model,
+                ref_model,
                 sequences,
                 prompt_lens,
                 attention_masks,
                 tokenizer.eos_token_id,
                 score_micro_batch_size,
             ).detach()
+        else:
+            with raw_model.disable_adapter():
+                logp_ref = completion_logprob_chunks(
+                    raw_model,
+                    sequences,
+                    prompt_lens,
+                    attention_masks,
+                    tokenizer.eos_token_id,
+                    score_micro_batch_size,
+                ).detach()
 
     theta_for_z_chunks = []
     chunk_rng_states = []

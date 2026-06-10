@@ -27,6 +27,7 @@ from blockwise_power_tb_train import (
     load_checkpoint_state,
     load_lora_model,
     load_math_dataset,
+    load_reference_model,
     maybe_init_wandb,
     resolve_model_name,
     resolve_prompt_model_key,
@@ -516,6 +517,7 @@ def encode_buffer_group(tokenizer, rows, device):
 
 def train_stage_from_buffer(
     model,
+    ref_model,
     tokenizer,
     optimizer,
     buffer_df,
@@ -644,6 +646,7 @@ def train_stage_from_buffer(
                         args.score_micro_batch_size,
                         micro_sequences / total_sequences,
                         active_callback=active_loss_callback,
+                        ref_model=ref_model,
                     )
                     debug_log(f"[block {block_idx}] step {step_id} score chunk loss/backward end", rank=rank)
                 else:
@@ -659,6 +662,7 @@ def train_stage_from_buffer(
                         args.beta,
                         args.completions_per_prefix,
                         args.score_micro_batch_size,
+                        ref_model=ref_model,
                     )
                     debug_log(f"[block {block_idx}] step {step_id} loss forward end", rank=rank)
                     debug_log(f"[block {block_idx}] step {step_id} backward begin", rank=rank)
@@ -954,6 +958,13 @@ def main():
                 stage_adapter_path,
                 attn_implementation=args.attn_implementation,
             )
+            debug_log(f"[block {block_idx}] loading reference model", rank=rank)
+            ref_model = load_reference_model(
+                model_name,
+                args.torch_dtype,
+                distributed_device,
+                attn_implementation=args.attn_implementation,
+            )
             model.train()
             if distributed:
                 debug_log(f"[block {block_idx}] wrapping model with DDP begin", rank=rank)
@@ -994,6 +1005,7 @@ def main():
 
             global_step = train_stage_from_buffer(
                 model,
+                ref_model,
                 tokenizer,
                 optimizer,
                 buffer_df,
@@ -1054,6 +1066,7 @@ def main():
                 log_point(f"[block {block_idx}] checkpoint_latest updated", rank=rank)
 
             del model
+            del ref_model
             del optimizer
             clear_cuda()
 
