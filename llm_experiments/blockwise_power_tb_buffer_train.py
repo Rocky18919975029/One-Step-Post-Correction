@@ -144,13 +144,14 @@ def should_log_wandb_step(args, step):
     return args.wandb_log_every == 1 or step % args.wandb_log_every == 0
 
 
-def dump_micro_batch_debug(output_dir, block_idx, step_id, micro_start, micro_indices, micro_df, prompt_lens, sequences):
+def dump_micro_batch_debug(output_dir, block_idx, rank, step_id, micro_start, micro_indices, micro_df, prompt_lens, sequences):
     debug_dir = Path(output_dir) / "debug_logs" / "micro_batches"
     debug_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"block{block_idx}_step{step_id}_micro{micro_start}"
+    stem = f"block{block_idx}_rank{rank}_step{step_id}_micro{micro_start}"
     micro_df.to_csv(debug_dir / f"{stem}.csv", index=False)
     meta = {
         "block_idx": block_idx,
+        "rank": rank,
         "step": step_id,
         "micro_start": micro_start,
         "example_indices": [int(idx) for idx in micro_indices],
@@ -566,10 +567,11 @@ def train_stage_from_buffer(
                     micro_df,
                     next(unwrap_model(model).parameters()).device,
                 )
-                if rank == 0 and not args.disable_micro_batch_debug_dump:
+                if not args.disable_micro_batch_debug_dump:
                     dump_micro_batch_debug(
                         args.output_dir,
                         block_idx,
+                        rank,
                         step_id,
                         micro_start,
                         micro_indices,
