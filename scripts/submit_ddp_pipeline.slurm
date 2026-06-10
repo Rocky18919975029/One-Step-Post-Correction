@@ -26,6 +26,8 @@ set -euo pipefail
 # Gradient checkpointing defaults off on H100 because this DDP environment has
 # shown CUDA/NCCL instability on that path; set GRADIENT_CHECKPOINTING=1 only
 # when memory pressure requires it.
+# Attention defaults to eager because SDPA has triggered rank-local SIGSEGVs on
+# this cluster under DDP training.
 
 REPO_DIR="${REPO_DIR:-/data/user/zhongal/One-Step-Post-Correction}"
 CONDA_ENV="${CONDA_ENV:-psamp}"
@@ -65,6 +67,7 @@ BETA="${BETA:-1.0}"
 LR="${LR:-1e-5}"
 SEED="${SEED:-0}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
+ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-eager}"
 
 EVAL_BACKEND="${EVAL_BACKEND:-vllm}"
 EVAL_EXAMPLES="${EVAL_EXAMPLES:-500}"
@@ -154,6 +157,7 @@ cmd=(
   --beta "$BETA"
   --lr "$LR"
   --seed "$SEED"
+  --attn_implementation "$ATTN_IMPLEMENTATION"
   --save_samples
   --save_every_block
   --eval_backend "$EVAL_BACKEND"

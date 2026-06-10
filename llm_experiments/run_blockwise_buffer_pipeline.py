@@ -377,7 +377,7 @@ def main():
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--attn_implementation", type=str, default="sdpa", choices=["eager", "sdpa", "flash_attention_2"])
+    parser.add_argument("--attn_implementation", type=str, default="eager", choices=["eager", "sdpa", "flash_attention_2"])
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--save_samples", action="store_true")
     parser.add_argument("--save_every_block", action="store_true")
@@ -429,7 +429,7 @@ def main():
 
     base_env = os.environ.copy()
     base_env["PYTHONUNBUFFERED"] = "1"
-    base_env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    base_env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
 
     sampler_env = base_env.copy()
     sampler_env["CUDA_VISIBLE_DEVICES"] = args.sampler_gpus
