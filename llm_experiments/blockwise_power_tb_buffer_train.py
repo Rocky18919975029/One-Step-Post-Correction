@@ -35,6 +35,7 @@ from blockwise_power_tb_train import (
     sync_cuda_if_available,
     unwrap_model,
     vargrad_tb_loss,
+    vargrad_tb_loss_with_score_chunk_backward,
 )
 from power_samp_utils import format_prompt
 
@@ -580,25 +581,42 @@ def train_stage_from_buffer(
                     f"[block {block_idx}] step {step_id} micro prepared rows={len(micro_df)} seq_shape={tuple(sequences.shape)} max_prompt_len={max(prompt_lens)} reward_mean={float(rewards.mean().detach().cpu()):.4f}",
                     rank=rank,
                 )
-                debug_log(f"[block {block_idx}] step {step_id} loss forward begin", rank=rank)
-                loss, logp_theta, logp_ref = vargrad_tb_loss(
-                    model,
-                    tokenizer,
-                    sequences,
-                    prompt_lens,
-                    attention_masks,
-                    rewards,
-                    args.alpha,
-                    args.beta,
-                    args.completions_per_prefix,
-                    args.score_micro_batch_size,
-                )
-                debug_log(f"[block {block_idx}] step {step_id} loss forward end", rank=rank)
                 micro_sequences = len(micro_df)
-                debug_log(f"[block {block_idx}] step {step_id} backward begin", rank=rank)
-                (loss * (micro_sequences / total_sequences)).backward()
-                sync_cuda_if_available()
-                debug_log(f"[block {block_idx}] step {step_id} backward end", rank=rank)
+                if args.score_chunk_backward:
+                    debug_log(f"[block {block_idx}] step {step_id} score chunk loss/backward begin", rank=rank)
+                    loss, logp_theta, logp_ref = vargrad_tb_loss_with_score_chunk_backward(
+                        model,
+                        tokenizer,
+                        sequences,
+                        prompt_lens,
+                        attention_masks,
+                        rewards,
+                        args.alpha,
+                        args.beta,
+                        args.completions_per_prefix,
+                        args.score_micro_batch_size,
+                        micro_sequences / total_sequences,
+                    )
+                    debug_log(f"[block {block_idx}] step {step_id} score chunk loss/backward end", rank=rank)
+                else:
+                    debug_log(f"[block {block_idx}] step {step_id} loss forward begin", rank=rank)
+                    loss, logp_theta, logp_ref = vargrad_tb_loss(
+                        model,
+                        tokenizer,
+                        sequences,
+                        prompt_lens,
+                        attention_masks,
+                        rewards,
+                        args.alpha,
+                        args.beta,
+                        args.completions_per_prefix,
+                        args.score_micro_batch_size,
+                    )
+                    debug_log(f"[block {block_idx}] step {step_id} loss forward end", rank=rank)
+                    debug_log(f"[block {block_idx}] step {step_id} backward begin", rank=rank)
+                    (loss * (micro_sequences / total_sequences)).backward()
+                    sync_cuda_if_available()
+                    debug_log(f"[block {block_idx}] step {step_id} backward end", rank=rank)
 
                 loss_sum += float(loss.detach().cpu()) * micro_sequences
                 reward_sum += float(rewards.sum().detach().cpu())
@@ -692,6 +710,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--micro_batch_size", type=int, default=1)
     parser.add_argument("--score_micro_batch_size", type=int, default=None)
+    parser.add_argument("--score_chunk_backward", action="store_true")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--block_size", type=int, default=192)
     parser.add_argument("--num_blocks", type=int, default=3)

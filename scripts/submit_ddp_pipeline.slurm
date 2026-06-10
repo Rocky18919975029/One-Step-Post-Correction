@@ -55,6 +55,7 @@ MAX_EXAMPLES="${MAX_EXAMPLES:-}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 SCORE_MICRO_BATCH_SIZE="${SCORE_MICRO_BATCH_SIZE:-1}"
+SCORE_CHUNK_BACKWARD="${SCORE_CHUNK_BACKWARD:-0}"
 EPOCHS="${EPOCHS:-1}"
 NUM_BLOCKS="${NUM_BLOCKS:-16}"
 BLOCK_SIZE="${BLOCK_SIZE:-192}"
@@ -179,6 +180,12 @@ cmd=(
 case "${GRADIENT_CHECKPOINTING,,}" in
   1|true|yes|on)
     cmd+=(--gradient_checkpointing)
+    ;;
+esac
+
+case "${SCORE_CHUNK_BACKWARD,,}" in
+  1|true|yes|on)
+    cmd+=(--score_chunk_backward)
     ;;
 esac
 
