@@ -23,6 +23,9 @@ set -euo pipefail
 # user's default enabled account.
 # GPU compute nodes are assumed to have no internet access. Make sure the model
 # and datasets are already present in the local Hugging Face/data caches.
+# Gradient checkpointing defaults off on H100 because this DDP environment has
+# shown CUDA/NCCL instability on that path; set GRADIENT_CHECKPOINTING=1 only
+# when memory pressure requires it.
 
 REPO_DIR="${REPO_DIR:-/data/user/zhongal/One-Step-Post-Correction}"
 CONDA_ENV="${CONDA_ENV:-psamp}"
@@ -61,6 +64,7 @@ ALPHA="${ALPHA:-4.0}"
 BETA="${BETA:-1.0}"
 LR="${LR:-1e-5}"
 SEED="${SEED:-0}"
+GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
 
 EVAL_BACKEND="${EVAL_BACKEND:-vllm}"
 EVAL_EXAMPLES="${EVAL_EXAMPLES:-500}"
@@ -150,7 +154,6 @@ cmd=(
   --beta "$BETA"
   --lr "$LR"
   --seed "$SEED"
-  --gradient_checkpointing
   --save_samples
   --save_every_block
   --eval_backend "$EVAL_BACKEND"
@@ -163,6 +166,12 @@ cmd=(
   --vllm_enforce_eager
   --quiet_debug_logs
 )
+
+case "${GRADIENT_CHECKPOINTING,,}" in
+  1|true|yes|on)
+    cmd+=(--gradient_checkpointing)
+    ;;
+esac
 
 if [[ -n "$MAX_EXAMPLES" ]]; then
   cmd+=(--max_examples "$MAX_EXAMPLES")
