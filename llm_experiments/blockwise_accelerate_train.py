@@ -17,6 +17,7 @@ from blockwise_power_tb_train import (
     completion_logprob,
     enable_gradient_checkpointing,
     load_lora_model,
+    maybe_init_wandb,
     resolve_model_name,
     seed_everything,
     unwrap_model,
@@ -107,16 +108,22 @@ def save_block_adapter(output_dir, block_idx, model, tokenizer, accelerator):
 
 def load_resume_state(checkpoint_dir, optimizer):
     if checkpoint_dir is None:
-        return 0
+        return 0, None
     checkpoint_dir = Path(checkpoint_dir)
     state_path = checkpoint_dir / "training_state.pt"
     if not state_path.exists():
-        return 0
+        return 0, None
     checkpoint = torch.load(state_path, map_location="cpu", weights_only=False)
     if optimizer is not None and "optimizer" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])
     state = checkpoint.get("state", {})
-    return int(state.get("global_step", 0) or 0)
+    return int(state.get("global_step", 0) or 0), state
+
+
+def should_log_wandb(args, step):
+    if args.wandb_log_every <= 0:
+        return True
+    return args.wandb_log_every == 1 or step % args.wandb_log_every == 0
 
 
 def train_scored_block(args):
@@ -170,11 +177,15 @@ def train_scored_block(args):
     )
     model.train()
     optimizer = torch.optim.AdamW([param for param in model.parameters() if param.requires_grad], lr=args.lr)
-    checkpoint_step = load_resume_state(args.resume_from_checkpoint, optimizer)
+    checkpoint_step, resume_state = load_resume_state(args.resume_from_checkpoint, optimizer)
 
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
     if args.gradient_checkpointing:
         enable_gradient_checkpointing(model)
+
+    wandb_run = maybe_init_wandb(args, 0 if accelerator.is_main_process else accelerator.process_index, resume_state)
+    if accelerator.is_main_process and wandb_run is not None and args.wandb_id is None:
+        args.wandb_id = wandb_run.id
 
     global_step = int(args.start_step or checkpoint_step)
     metrics = []
@@ -231,16 +242,18 @@ def train_scored_block(args):
                     )
                     if accelerator.is_main_process and (args.log_every <= 0 or global_step % args.log_every == 0):
                         print(record, flush=True)
+                    if wandb_run is not None and should_log_wandb(args, global_step):
+                        wandb_run.log(record, step=global_step)
         progress.close()
 
     state = {
         "global_step": global_step,
         "next_block_idx": args.block_idx + 1,
         "current_block_idx": None,
-        "wandb_id": None,
-        "wandb_project": None,
-        "wandb_entity": None,
-        "wandb_run_name": None,
+        "wandb_id": wandb_run.id if wandb_run is not None else args.wandb_id,
+        "wandb_project": args.wandb_project,
+        "wandb_entity": args.wandb_entity,
+        "wandb_run_name": args.wandb_run_name,
     }
     if args.save_every_block:
         save_block_adapter(output_dir, args.block_idx, model, tokenizer, accelerator)
@@ -253,6 +266,8 @@ def train_scored_block(args):
         new_metrics = pd.DataFrame(metrics)
         pd.concat([old_metrics, new_metrics], ignore_index=True).to_csv(metrics_path, index=False)
         print(f"[block {args.block_idx}] accelerate checkpoint_latest updated", flush=True)
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 def main():
@@ -277,6 +292,13 @@ def main():
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
     parser.add_argument("--start_step", type=int, default=0)
     parser.add_argument("--log_every", type=int, default=1)
+    parser.add_argument("--use_wandb", action="store_true")
+    parser.add_argument("--wandb_project", type=str, default="one-step-post-correction")
+    parser.add_argument("--wandb_entity", type=str, default=None)
+    parser.add_argument("--wandb_run_name", type=str, default=None)
+    parser.add_argument("--wandb_id", type=str, default=None)
+    parser.add_argument("--wandb_resume", type=str, default="allow")
+    parser.add_argument("--wandb_log_every", type=int, default=0)
     args = parser.parse_args()
     train_scored_block(args)
 

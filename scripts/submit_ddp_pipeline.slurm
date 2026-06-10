@@ -39,7 +39,7 @@ TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
 HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 WANDB_MODE="${WANDB_MODE:-offline}"
-WANDB_DISABLED="${WANDB_DISABLED:-true}"
+WANDB_DISABLED="${WANDB_DISABLED:-false}"
 
 GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
 TRAIN_GPUS="${TRAIN_GPUS:-$GPU_IDS}"
@@ -50,6 +50,13 @@ DATA_PATH="${DATA_PATH:-../data/train.parquet}"
 EVAL_DATA_PATH="${EVAL_DATA_PATH:-data/MATH500.json}"
 MODEL="${MODEL:-qwen}"
 PROMPT_MODEL="${PROMPT_MODEL:-qwen}"
+USE_WANDB="${USE_WANDB:-1}"
+WANDB_PROJECT="${WANDB_PROJECT:-one-step-post-correction}"
+WANDB_ENTITY="${WANDB_ENTITY:-}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-}"
+WANDB_ID="${WANDB_ID:-}"
+WANDB_RESUME="${WANDB_RESUME:-allow}"
+WANDB_LOG_EVERY="${WANDB_LOG_EVERY:-0}"
 
 MAX_EXAMPLES="${MAX_EXAMPLES:-}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -197,6 +204,25 @@ case "${ACCELERATE_TRAIN,,}" in
     cmd+=(--accelerate_train)
     ;;
 esac
+
+case "${USE_WANDB,,}" in
+  1|true|yes|on)
+    cmd+=(--use_wandb)
+    ;;
+esac
+
+cmd+=(--wandb_project "$WANDB_PROJECT")
+cmd+=(--wandb_resume "$WANDB_RESUME")
+cmd+=(--wandb_log_every "$WANDB_LOG_EVERY")
+if [[ -n "$WANDB_ENTITY" ]]; then
+  cmd+=(--wandb_entity "$WANDB_ENTITY")
+fi
+if [[ -n "$WANDB_RUN_NAME" ]]; then
+  cmd+=(--wandb_run_name "$WANDB_RUN_NAME")
+fi
+if [[ -n "$WANDB_ID" ]]; then
+  cmd+=(--wandb_id "$WANDB_ID")
+fi
 
 if [[ -n "$MAX_EXAMPLES" ]]; then
   cmd+=(--max_examples "$MAX_EXAMPLES")

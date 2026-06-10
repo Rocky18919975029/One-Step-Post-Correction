@@ -251,6 +251,20 @@ def build_train_command(args, block_idx, output_dir):
             trainer_args.append("--gradient_checkpointing")
         if args.save_every_block:
             trainer_args.append("--save_every_block")
+        if args.use_wandb:
+            trainer_args.append("--use_wandb")
+        if args.wandb_project is not None:
+            trainer_args.extend(["--wandb_project", args.wandb_project])
+        if args.wandb_entity is not None:
+            trainer_args.extend(["--wandb_entity", args.wandb_entity])
+        if args.wandb_run_name is not None:
+            trainer_args.extend(["--wandb_run_name", args.wandb_run_name])
+        if args.wandb_id is not None:
+            trainer_args.extend(["--wandb_id", args.wandb_id])
+        if args.wandb_resume is not None:
+            trainer_args.extend(["--wandb_resume", args.wandb_resume])
+        if args.wandb_log_every is not None:
+            trainer_args.extend(["--wandb_log_every", str(args.wandb_log_every)])
         if not args.ddp_train:
             return trainer_args
 
