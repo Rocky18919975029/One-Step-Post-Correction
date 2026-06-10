@@ -31,15 +31,15 @@ class ScoredBufferDataset(Dataset):
         df = buffer_df.sort_values(["example_idx", "sample_idx"]).copy()
         if completions_per_prefix is not None:
             df = df[df["sample_idx"] < completions_per_prefix].copy()
-        self.groups = [group.copy() for _, group in df.groupby("example_idx", sort=True)]
-        if not self.groups:
+        self.rows = df.to_dict("records")
+        if not self.rows:
             raise ValueError("Scored buffer has no rows after filtering by completions_per_prefix.")
 
     def __len__(self):
-        return len(self.groups)
+        return len(self.rows)
 
     def __getitem__(self, idx):
-        return self.groups[idx].to_dict("records")
+        return self.rows[idx]
 
 
 class ScoredBufferCollator:
@@ -47,9 +47,7 @@ class ScoredBufferCollator:
         self.tokenizer = tokenizer
 
     def __call__(self, examples):
-        rows = []
-        for group in examples:
-            rows.extend(group)
+        rows = list(examples)
         texts = [str(row["prefix_text"]) + str(row["completion"]) for row in rows]
         encoded = self.tokenizer(texts, padding=True, return_tensors="pt")
         return {
@@ -121,8 +119,9 @@ def load_resume_state(checkpoint_dir, optimizer):
 
 
 def train_scored_block(args):
+    accumulation_rows = max(1, args.batch_size * args.completions_per_prefix)
     accelerator = Accelerator(
-        gradient_accumulation_steps=max(1, math.ceil(args.batch_size / args.micro_batch_size))
+        gradient_accumulation_steps=max(1, math.ceil(accumulation_rows / args.micro_batch_size))
     )
     seed_everything(args.seed + accelerator.process_index)
 
