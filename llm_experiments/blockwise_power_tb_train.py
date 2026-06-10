@@ -175,11 +175,9 @@ def enable_gradient_checkpointing(model):
     raw_model = unwrap_model(model)
     if hasattr(raw_model, "config"):
         raw_model.config.use_cache = False
-    if hasattr(raw_model, "enable_input_require_grads"):
-        raw_model.enable_input_require_grads()
     if hasattr(raw_model, "gradient_checkpointing_enable"):
         try:
-            raw_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            raw_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
         except TypeError:
             raw_model.gradient_checkpointing_enable()
 
