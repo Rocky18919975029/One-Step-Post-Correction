@@ -225,6 +225,8 @@ def build_train_command(args, block_idx, output_dir):
         trainer_args.append("--save_every_block")
     if args.score_micro_batch_size is not None:
         trainer_args.extend(["--score_micro_batch_size", str(args.score_micro_batch_size)])
+    if args.stream_score_backward:
+        trainer_args.append("--stream_score_backward")
     if args.save_every_steps:
         trainer_args.extend(["--save_every_steps", str(args.save_every_steps)])
     if args.use_wandb:
@@ -366,6 +368,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--micro_batch_size", type=int, default=1)
     parser.add_argument("--score_micro_batch_size", type=int, default=None)
+    parser.add_argument("--stream_score_backward", action="store_true")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--num_blocks", type=int, default=None)
     parser.add_argument("--block_size", type=int, default=192)

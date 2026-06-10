@@ -23,9 +23,9 @@ set -euo pipefail
 # user's default enabled account.
 # GPU compute nodes are assumed to have no internet access. Make sure the model
 # and datasets are already present in the local Hugging Face/data caches.
-# Gradient checkpointing defaults on for full H100 runs because
-# completions_per_prefix=8 can exceed 80GB during training. It should be paired
-# with eager attention on this cluster.
+# For completions_per_prefix=8, prefer GRADIENT_CHECKPOINTING=0 together with
+# STREAM_SCORE_BACKWARD=1 to avoid keeping every completion graph alive at once.
+# Gradient checkpointing remains available as an override.
 # Attention defaults to eager because SDPA has triggered rank-local SIGSEGVs on
 # this cluster under DDP training.
 
@@ -67,6 +67,7 @@ BETA="${BETA:-1.0}"
 LR="${LR:-1e-5}"
 SEED="${SEED:-0}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-1}"
+STREAM_SCORE_BACKWARD="${STREAM_SCORE_BACKWARD:-0}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-eager}"
 CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-1}"
 
@@ -179,6 +180,12 @@ cmd=(
 case "${GRADIENT_CHECKPOINTING,,}" in
   1|true|yes|on)
     cmd+=(--gradient_checkpointing)
+    ;;
+esac
+
+case "${STREAM_SCORE_BACKWARD,,}" in
+  1|true|yes|on)
+    cmd+=(--stream_score_backward)
     ;;
 esac
 

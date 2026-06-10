@@ -222,6 +222,19 @@ def completion_logprob_chunks(model, sequences, prompt_lens, attention_masks, eo
     return torch.cat(chunks, dim=0)
 
 
+def _capture_rng_state(device):
+    state = {"cpu": torch.get_rng_state()}
+    if torch.cuda.is_available() and torch.device(device).type == "cuda":
+        state["cuda"] = torch.cuda.get_rng_state(device)
+    return state
+
+
+def _restore_rng_state(state, device):
+    torch.set_rng_state(state["cpu"])
+    if "cuda" in state and torch.cuda.is_available() and torch.device(device).type == "cuda":
+        torch.cuda.set_rng_state(state["cuda"], device)
+
+
 def sync_cuda_if_available():
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -303,6 +316,81 @@ def vargrad_tb_loss(
     residual = expanded_log_z_hat.detach() + logp_theta_all - target
     loss = residual.pow(2).mean()
     return loss, logp_theta_all.detach(), logp_ref.detach()
+
+
+def vargrad_tb_loss_streaming_backward(
+    model,
+    tokenizer,
+    sequences,
+    prompt_lens,
+    attention_masks,
+    rewards,
+    alpha,
+    beta,
+    num_return_sequences,
+    score_micro_batch_size,
+    loss_scale,
+):
+    raw_model = unwrap_model(model)
+    if not hasattr(raw_model, "disable_adapter"):
+        raise RuntimeError("Reference logprob requires a PEFT LoRA model with disable_adapter().")
+
+    score_micro_batch_size = max(1, int(score_micro_batch_size))
+    device = sequences.device
+    row_count = sequences.shape[0]
+
+    with torch.no_grad():
+        with raw_model.disable_adapter():
+            logp_ref = completion_logprob_chunks(
+                raw_model,
+                sequences,
+                prompt_lens,
+                attention_masks,
+                tokenizer.eos_token_id,
+                score_micro_batch_size,
+            ).detach()
+
+    theta_chunks = []
+    chunk_rng_states = []
+    chunk_bounds = []
+    for start in range(0, row_count, score_micro_batch_size):
+        end = min(start + score_micro_batch_size, row_count)
+        chunk_bounds.append((start, end))
+        rng_state = _capture_rng_state(device)
+        with torch.no_grad():
+            theta_chunk = completion_logprob(
+                model,
+                sequences[start:end],
+                prompt_lens[start:end],
+                attention_masks[start:end],
+                tokenizer.eos_token_id,
+            ).detach()
+        chunk_rng_states.append(rng_state)
+        theta_chunks.append(theta_chunk)
+
+    logp_theta_all = torch.cat(theta_chunks, dim=0)
+    log_z_terms = alpha * logp_ref - logp_theta_all + rewards / beta
+    log_z_hat = log_z_terms.view(-1, num_return_sequences).mean(dim=1)
+    expanded_log_z_hat = log_z_hat.repeat_interleave(num_return_sequences).detach()
+    target = (alpha * logp_ref + rewards / beta).detach()
+    detached_residual = expanded_log_z_hat + logp_theta_all - target
+    detached_loss = detached_residual.pow(2).mean()
+
+    for (start, end), rng_state in zip(chunk_bounds, chunk_rng_states):
+        _restore_rng_state(rng_state, device)
+        logp_theta = completion_logprob(
+            model,
+            sequences[start:end],
+            prompt_lens[start:end],
+            attention_masks[start:end],
+            tokenizer.eos_token_id,
+        )
+        residual = expanded_log_z_hat[start:end] + logp_theta - target[start:end]
+        chunk_loss = residual.pow(2).sum() / row_count
+        (chunk_loss * loss_scale).backward()
+        sync_cuda_if_available()
+
+    return detached_loss.detach(), logp_theta_all.detach(), logp_ref.detach()
 
 
 def save_checkpoint(output_dir, model, tokenizer, optimizer, state, distributed):
