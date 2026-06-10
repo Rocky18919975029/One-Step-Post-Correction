@@ -416,7 +416,7 @@ The maintained trainer defaults to single-GPU for reliability and can be launche
 - mid-block checkpointing with `save_every_steps` is not supported in DDP yet; use `save_every_block`
 - DDP initialization assumes every rank loads the same base model and adapter, so the trainer skips the expensive initial full-model parameter broadcast
 - when `gradient_checkpointing` is enabled with DDP, the trainer enables checkpointing on the PEFT model before wrapping it with DDP
-- PEFT `enable_input_require_grads()` is intentionally not called in the DDP checkpointing path; this environment uses reentrant checkpointing to avoid PEFT/DDP hook instability
+- for reentrant checkpointing, the trainer calls `enable_input_require_grads()` after enabling checkpointing and before DDP wrapping
 - DDP training and vLLM sampler workers use separate default ports, `29600` and `29700`, to avoid stale rendezvous/NCCL port collisions between stages
 - multi-GPU sampler and DDP trainer runs default to conservative NCCL transport settings, disabling P2P and IB unless the environment already overrides those variables
 

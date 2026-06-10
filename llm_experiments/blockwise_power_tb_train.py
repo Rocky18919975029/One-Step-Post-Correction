@@ -180,6 +180,8 @@ def enable_gradient_checkpointing(model):
             raw_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
         except TypeError:
             raw_model.gradient_checkpointing_enable()
+    if hasattr(raw_model, "enable_input_require_grads"):
+        raw_model.enable_input_require_grads()
 
 
 def completion_end(seq, prompt_len, eos_token_id):
