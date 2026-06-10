@@ -408,6 +408,9 @@ def vargrad_tb_loss_with_score_chunk_backward(
                     tokenizer.eos_token_id,
                     score_micro_batch_size,
                 ).detach()
+    sync_cuda_if_available()
+    if active_callback is not None:
+        active_callback("ref_forward_end", 0, row_count)
 
     theta_for_z_chunks = []
     chunk_rng_states = []
@@ -425,6 +428,9 @@ def vargrad_tb_loss_with_score_chunk_backward(
                     tokenizer.eos_token_id,
                 ).detach()
             )
+        sync_cuda_if_available()
+        if active_callback is not None:
+            active_callback("theta_for_z_forward_end", start, end)
 
     logp_theta_for_z = torch.cat(theta_for_z_chunks, dim=0)
     log_z_terms = alpha * logp_ref - logp_theta_for_z + rewards / beta
@@ -445,12 +451,17 @@ def vargrad_tb_loss_with_score_chunk_backward(
             attention_masks[start:end],
             tokenizer.eos_token_id,
         )
+        sync_cuda_if_available()
+        if active_callback is not None:
+            active_callback("theta_grad_forward_end", start, end)
         residual = expanded_log_z_hat[start:end] + logp_theta - target[start:end]
         chunk_loss = residual.pow(2).sum() / row_count
         if active_callback is not None:
             active_callback("theta_backward", start, end)
         (chunk_loss * loss_scale).backward()
         sync_cuda_if_available()
+        if active_callback is not None:
+            active_callback("theta_backward_end", start, end)
 
     if active_callback is not None:
         active_callback("complete", 0, row_count)
