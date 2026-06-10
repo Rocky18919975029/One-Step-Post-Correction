@@ -10,6 +10,7 @@ import torch
 import transformers
 from accelerate import Accelerator
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
 from blockwise_power_tb_buffer_train import PRECOMPUTED_SCORE_COLUMNS
 from blockwise_power_tb_train import (
@@ -178,6 +179,12 @@ def train_scored_block(args):
     global_step = int(args.start_step or checkpoint_step)
     metrics = []
     for epoch in range(args.epochs):
+        total_optimizer_steps = math.ceil(len(dataloader) / accelerator.gradient_accumulation_steps)
+        progress = tqdm(
+            total=total_optimizer_steps,
+            desc=f"block {args.block_idx} epoch {epoch}",
+            disable=not accelerator.is_main_process,
+        )
         for batch_idx, batch in enumerate(dataloader):
             with accelerator.accumulate(model):
                 logp_theta = completion_logprob(
@@ -217,8 +224,14 @@ def train_scored_block(args):
                         "logp_ref_mean": metric[3],
                     }
                     metrics.append(record)
+                    progress.update(1)
+                    progress.set_postfix(
+                        loss=f"{metric[0]:.4f}",
+                        reward=f"{metric[1]:.4f}",
+                    )
                     if accelerator.is_main_process and (args.log_every <= 0 or global_step % args.log_every == 0):
                         print(record, flush=True)
+        progress.close()
 
     state = {
         "global_step": global_step,
