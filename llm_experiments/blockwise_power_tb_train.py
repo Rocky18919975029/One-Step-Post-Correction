@@ -367,7 +367,7 @@ def vargrad_tb_loss_with_score_chunk_backward(
         with torch.no_grad():
             theta_for_z_chunks.append(
                 completion_logprob(
-                    model,
+                    raw_model,
                     sequences[start:end],
                     prompt_lens[start:end],
                     attention_masks[start:end],
