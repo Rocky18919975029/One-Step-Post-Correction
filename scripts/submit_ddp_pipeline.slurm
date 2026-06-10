@@ -68,6 +68,7 @@ LR="${LR:-1e-5}"
 SEED="${SEED:-0}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-1}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-eager}"
+CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-1}"
 
 EVAL_BACKEND="${EVAL_BACKEND:-vllm}"
 EVAL_EXAMPLES="${EVAL_EXAMPLES:-500}"
@@ -111,6 +112,7 @@ hash -r
 cd "$REPO_DIR/llm_experiments"
 
 export PYTHONUNBUFFERED=1
+export CUDA_LAUNCH_BLOCKING
 export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
 export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
@@ -131,6 +133,7 @@ print(f"sys.executable={sys.executable}", flush=True)
 print(f"peft={peft.__version__}", flush=True)
 print(f"torch={torch.__version__}", flush=True)
 PY
+echo "CUDA_LAUNCH_BLOCKING=$CUDA_LAUNCH_BLOCKING"
 
 cmd=(
   "$PYTHON_BIN" run_blockwise_buffer_pipeline.py
