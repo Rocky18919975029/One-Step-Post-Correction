@@ -2,6 +2,7 @@ import argparse
 import faulthandler
 import gc
 import inspect
+import json
 import os
 import random
 import subprocess
@@ -160,6 +161,35 @@ def dump_micro_batch_debug(output_dir, block_idx, rank, step_id, micro_start, mi
         "prompt_lens": [int(x) for x in prompt_lens],
     }
     torch.save(meta, debug_dir / f"{stem}.pt")
+
+
+def write_active_loss_debug(output_dir, block_idx, rank, step_id, micro_start, phase, chunk_start, chunk_end, micro_df, prompt_lens, sequences):
+    debug_dir = Path(output_dir) / "debug_logs" / "active_loss"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "block_idx": int(block_idx),
+        "rank": int(rank),
+        "step": int(step_id),
+        "micro_start": int(micro_start),
+        "phase": str(phase),
+        "chunk_start": int(chunk_start),
+        "chunk_end": int(chunk_end),
+        "rows": int(len(micro_df)),
+        "seq_shape": [int(x) for x in sequences.shape],
+        "prompt_lens": [int(x) for x in prompt_lens],
+        "example_indices": [int(x) for x in micro_df["example_idx"].tolist()],
+        "sample_indices": [int(x) for x in micro_df["sample_idx"].tolist()],
+        "prefix_token_lens": [int(x) for x in micro_df["prefix_token_len"].tolist()],
+        "completion_token_lens": [int(x) for x in micro_df["completion_token_len"].tolist()],
+        "rewards": [float(x) for x in micro_df["reward"].tolist()],
+    }
+    rank_path = debug_dir / f"rank{rank}.json"
+    all_ranks_path = debug_dir / "latest_by_rank.jsonl"
+    with rank_path.open("w") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    with all_ranks_path.open("a") as handle:
+        handle.write(json.dumps(payload) + "\n")
 
 
 def load_vllm(model_name, args, adapter_path=None):
@@ -586,6 +616,21 @@ def train_stage_from_buffer(
                 micro_sequences = len(micro_df)
                 if args.score_chunk_backward:
                     debug_log(f"[block {block_idx}] step {step_id} score chunk loss/backward begin", rank=rank)
+                    def active_loss_callback(phase, chunk_start, chunk_end):
+                        write_active_loss_debug(
+                            args.output_dir,
+                            block_idx,
+                            rank,
+                            step_id,
+                            micro_start,
+                            phase,
+                            chunk_start,
+                            chunk_end,
+                            micro_df,
+                            prompt_lens,
+                            sequences,
+                        )
+
                     loss, logp_theta, logp_ref = vargrad_tb_loss_with_score_chunk_backward(
                         model,
                         tokenizer,
@@ -598,6 +643,7 @@ def train_stage_from_buffer(
                         args.completions_per_prefix,
                         args.score_micro_batch_size,
                         micro_sequences / total_sequences,
+                        active_callback=active_loss_callback,
                     )
                     debug_log(f"[block {block_idx}] step {step_id} score chunk loss/backward end", rank=rank)
                 else:

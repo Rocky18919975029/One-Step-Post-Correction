@@ -332,6 +332,7 @@ def vargrad_tb_loss_with_score_chunk_backward(
     num_return_sequences,
     score_micro_batch_size,
     loss_scale,
+    active_callback=None,
 ):
     raw_model = unwrap_model(model)
     if not hasattr(raw_model, "disable_adapter"):
@@ -344,6 +345,8 @@ def vargrad_tb_loss_with_score_chunk_backward(
         for start in range(0, row_count, score_micro_batch_size)
     ]
 
+    if active_callback is not None:
+        active_callback("ref_forward", 0, row_count)
     with torch.no_grad():
         with raw_model.disable_adapter():
             logp_ref = completion_logprob_chunks(
@@ -358,6 +361,8 @@ def vargrad_tb_loss_with_score_chunk_backward(
     theta_for_z_chunks = []
     chunk_rng_states = []
     for start, end in chunk_ranges:
+        if active_callback is not None:
+            active_callback("theta_for_z_forward", start, end)
         chunk_rng_states.append(capture_rng_state(sequences.device))
         with torch.no_grad():
             theta_for_z_chunks.append(
@@ -379,6 +384,8 @@ def vargrad_tb_loss_with_score_chunk_backward(
     detached_loss = detached_residual.pow(2).mean()
 
     for (start, end), rng_state in zip(chunk_ranges, chunk_rng_states):
+        if active_callback is not None:
+            active_callback("theta_grad_forward", start, end)
         restore_rng_state(rng_state, sequences.device)
         logp_theta = completion_logprob(
             model,
@@ -389,9 +396,13 @@ def vargrad_tb_loss_with_score_chunk_backward(
         )
         residual = expanded_log_z_hat[start:end] + logp_theta - target[start:end]
         chunk_loss = residual.pow(2).sum() / row_count
+        if active_callback is not None:
+            active_callback("theta_backward", start, end)
         (chunk_loss * loss_scale).backward()
         sync_cuda_if_available()
 
+    if active_callback is not None:
+        active_callback("complete", 0, row_count)
     return detached_loss.detach(), logp_theta_for_z.detach(), logp_ref.detach()
 
 
