@@ -23,9 +23,9 @@ set -euo pipefail
 # user's default enabled account.
 # GPU compute nodes are assumed to have no internet access. Make sure the model
 # and datasets are already present in the local Hugging Face/data caches.
-# Gradient checkpointing defaults off on H100 because this DDP environment has
-# shown CUDA/NCCL instability on that path; set GRADIENT_CHECKPOINTING=1 only
-# when memory pressure requires it.
+# Gradient checkpointing defaults on for full H100 runs because
+# completions_per_prefix=8 can exceed 80GB during training. It should be paired
+# with eager attention on this cluster.
 # Attention defaults to eager because SDPA has triggered rank-local SIGSEGVs on
 # this cluster under DDP training.
 
@@ -66,7 +66,7 @@ ALPHA="${ALPHA:-4.0}"
 BETA="${BETA:-1.0}"
 LR="${LR:-1e-5}"
 SEED="${SEED:-0}"
-GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
+GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-1}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-eager}"
 
 EVAL_BACKEND="${EVAL_BACKEND:-vllm}"
