@@ -119,6 +119,19 @@ def is_complete_buffer(output_dir, block_idx, args):
     return all(len(sample_ids) == args.completions_per_prefix for sample_ids in per_example_counts.values())
 
 
+def is_scored_buffer(output_dir, block_idx, args):
+    path = buffer_path(output_dir, block_idx)
+    if not is_complete_buffer(output_dir, block_idx, args):
+        return False
+    required_score_columns = {"logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
+    try:
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            return required_score_columns.issubset(set(reader.fieldnames or []))
+    except Exception:
+        return False
+
+
 def build_sampler_command(args, block_idx, output_dir):
     sampler_tp_size = args.vllm_tensor_parallel_size
     command = [
@@ -166,6 +179,33 @@ def build_sampler_command(args, block_idx, output_dir):
         command.append("--vllm_enforce_eager")
     if args.vllm_disable_custom_all_reduce:
         command.append("--vllm_disable_custom_all_reduce")
+    return command
+
+
+def build_score_command(args, block_idx, output_dir):
+    command = [
+        sys.executable,
+        "blockwise_score_buffer.py",
+        "--buffer_path",
+        str(buffer_path(output_dir, block_idx)),
+        "--model",
+        args.model,
+        "--torch_dtype",
+        "bfloat16",
+        "--attn_implementation",
+        args.attn_implementation,
+        "--score_batch_size",
+        str(args.score_batch_size),
+        "--completions_per_prefix",
+        str(args.completions_per_prefix),
+        "--alpha",
+        str(args.alpha),
+        "--beta",
+        str(args.beta),
+    ]
+    adapter_dir = checkpoint_adapter_dir(output_dir)
+    if block_idx > 1 and adapter_dir.exists():
+        command.extend(["--adapter_path", str(adapter_dir)])
     return command
 
 
@@ -368,6 +408,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--micro_batch_size", type=int, default=1)
     parser.add_argument("--score_micro_batch_size", type=int, default=None)
+    parser.add_argument("--score_batch_size", type=int, default=1)
     parser.add_argument("--score_chunk_backward", action="store_true")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--num_blocks", type=int, default=None)
@@ -449,6 +490,10 @@ def main():
         train_env.setdefault("NCCL_P2P_DISABLE", "1")
         train_env.setdefault("NCCL_IB_DISABLE", "1")
 
+    score_env = base_env.copy()
+    score_env["CUDA_VISIBLE_DEVICES"] = parse_gpu_list(args.train_gpus)[0]
+    score_env["MASTER_PORT"] = str(args.train_master_port + 2)
+
     start_block = read_next_block_idx(output_dir)
     if start_block > args.num_blocks:
         if args.eval_backend == "none":
@@ -465,7 +510,7 @@ def main():
         run_step(1, total_steps, "Evaluating latest checkpoint", build_eval_command(args, output_dir), train_env)
         return
 
-    total_steps = (args.num_blocks - start_block + 1) * 2 + 1
+    total_steps = (args.num_blocks - start_block + 1) * 3 + 1
     step_idx = 1
 
     for block_idx in range(start_block, args.num_blocks + 1):
@@ -482,6 +527,22 @@ def main():
                 f"Sampling block {block_idx} with vLLM",
                 build_sampler_command(args, block_idx, output_dir),
                 sampler_env,
+            )
+        step_idx += 1
+
+        if is_scored_buffer(output_dir, block_idx, args):
+            banner = f"[{step_idx}/{total_steps}] Reusing scored buffer for block {block_idx}"
+            print("\n" + "=" * len(banner), flush=True)
+            print(banner, flush=True)
+            print("=" * len(banner), flush=True)
+            print(f"Found scored buffer at {buffer_path(output_dir, block_idx)}; skipping scoring.", flush=True)
+        else:
+            run_step(
+                step_idx,
+                total_steps,
+                f"Scoring block {block_idx} buffer",
+                build_score_command(args, block_idx, output_dir),
+                score_env,
             )
         step_idx += 1
 

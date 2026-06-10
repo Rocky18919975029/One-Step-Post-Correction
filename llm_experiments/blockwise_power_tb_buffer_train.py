@@ -22,6 +22,7 @@ from tqdm import tqdm
 from blockwise_power_tb_train import (
     MODEL_NAME_BY_KEY,
     completion_end,
+    completion_logprob,
     enable_gradient_checkpointing,
     evaluate_model,
     load_checkpoint_state,
@@ -44,6 +45,7 @@ from power_samp_utils import format_prompt
 
 DEBUG_HANDLE = None
 QUIET_DEBUG_LOGS = False
+PRECOMPUTED_SCORE_COLUMNS = {"logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
 
 
 def resolve_data_path(path):
@@ -144,6 +146,10 @@ def should_log_wandb_step(args, step):
     if args.wandb_log_every <= 0:
         return False
     return args.wandb_log_every == 1 or step % args.wandb_log_every == 0
+
+
+def has_precomputed_scores(df):
+    return PRECOMPUTED_SCORE_COLUMNS.issubset(df.columns)
 
 
 def dump_micro_batch_debug(output_dir, block_idx, rank, step_id, micro_start, micro_indices, micro_df, prompt_lens, sequences):
@@ -534,6 +540,9 @@ def train_stage_from_buffer(
     checkpoint_callback=None,
 ):
     default_order = list(range(len(dataset)))
+    use_precomputed_scores = has_precomputed_scores(buffer_df)
+    if use_precomputed_scores:
+        debug_log(f"[block {block_idx}] using precomputed score columns for training loss", rank=rank, always=(rank == 0))
     resume_rank_order = None
     start_epoch = 0
     resume_batch_start = 0
@@ -616,7 +625,37 @@ def train_stage_from_buffer(
                     rank=rank,
                 )
                 micro_sequences = len(micro_df)
-                if args.score_chunk_backward:
+                if use_precomputed_scores:
+                    debug_log(f"[block {block_idx}] step {step_id} precomputed loss forward begin", rank=rank)
+                    logp_theta = completion_logprob(
+                        model,
+                        sequences,
+                        prompt_lens,
+                        attention_masks,
+                        tokenizer.eos_token_id,
+                    )
+                    log_z_hat = torch.tensor(
+                        micro_df["log_z_hat"].astype(float).to_numpy(),
+                        dtype=torch.float32,
+                        device=sequences.device,
+                    )
+                    target = torch.tensor(
+                        micro_df["tb_target"].astype(float).to_numpy(),
+                        dtype=torch.float32,
+                        device=sequences.device,
+                    )
+                    logp_ref = torch.tensor(
+                        micro_df["logp_ref"].astype(float).to_numpy(),
+                        dtype=torch.float32,
+                        device=sequences.device,
+                    )
+                    loss = (log_z_hat + logp_theta - target).pow(2).mean()
+                    debug_log(f"[block {block_idx}] step {step_id} precomputed loss forward end", rank=rank)
+                    debug_log(f"[block {block_idx}] step {step_id} backward begin", rank=rank)
+                    (loss * (micro_sequences / total_sequences)).backward()
+                    sync_cuda_if_available()
+                    debug_log(f"[block {block_idx}] step {step_id} backward end", rank=rank)
+                elif args.score_chunk_backward:
                     debug_log(f"[block {block_idx}] step {step_id} score chunk loss/backward begin", rank=rank)
                     def active_loss_callback(phase, chunk_start, chunk_end):
                         write_active_loss_debug(
@@ -949,6 +988,7 @@ def main():
             debug_log(f"[block {block_idx}] loading buffer from {buffer_path}", rank=rank)
             buffer_df = pd.read_csv(buffer_path)
             debug_log(f"[block {block_idx}] loaded {len(buffer_df)} buffered samples", rank=rank)
+            scored_buffer = has_precomputed_scores(buffer_df)
 
             debug_log(f"[block {block_idx}] loading train model", rank=rank)
             model = load_lora_model(
@@ -958,13 +998,15 @@ def main():
                 stage_adapter_path,
                 attn_implementation=args.attn_implementation,
             )
-            debug_log(f"[block {block_idx}] loading reference model", rank=rank)
-            ref_model = load_reference_model(
-                model_name,
-                args.torch_dtype,
-                distributed_device,
-                attn_implementation=args.attn_implementation,
-            )
+            ref_model = None
+            if not scored_buffer:
+                debug_log(f"[block {block_idx}] loading reference model", rank=rank)
+                ref_model = load_reference_model(
+                    model_name,
+                    args.torch_dtype,
+                    distributed_device,
+                    attn_implementation=args.attn_implementation,
+                )
             model.train()
             if distributed:
                 debug_log(f"[block {block_idx}] wrapping model with DDP begin", rank=rank)
@@ -1066,7 +1108,8 @@ def main():
                 log_point(f"[block {block_idx}] checkpoint_latest updated", rank=rank)
 
             del model
-            del ref_model
+            if ref_model is not None:
+                del ref_model
             del optimizer
             clear_cuda()
 
