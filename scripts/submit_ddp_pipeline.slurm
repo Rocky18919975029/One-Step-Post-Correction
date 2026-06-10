@@ -124,9 +124,11 @@ export WANDB_DISABLED
 echo "Python executable: $PYTHON_BIN"
 "$PYTHON_BIN" - <<'PY'
 import sys
+import peft
 import torch
 
 print(f"sys.executable={sys.executable}", flush=True)
+print(f"peft={peft.__version__}", flush=True)
 print(f"torch={torch.__version__}", flush=True)
 PY
 

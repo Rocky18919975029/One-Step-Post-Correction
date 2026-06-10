@@ -175,26 +175,13 @@ def enable_gradient_checkpointing(model):
     raw_model = unwrap_model(model)
     if hasattr(raw_model, "config"):
         raw_model.config.use_cache = False
-
-    inner = raw_model
-    if hasattr(inner, "base_model"):
-        inner = inner.base_model
-    if hasattr(inner, "model"):
-        inner = inner.model
-
-    if hasattr(inner, "gradient_checkpointing_enable"):
+    if hasattr(raw_model, "enable_input_require_grads"):
+        raw_model.enable_input_require_grads()
+    if hasattr(raw_model, "gradient_checkpointing_enable"):
         try:
-            inner.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
+            raw_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         except TypeError:
-            inner.gradient_checkpointing_enable()
-
-    def make_inputs_require_grad(module, inputs, output):
-        output.requires_grad_(True)
-
-    if hasattr(inner, "embed_tokens"):
-        inner.embed_tokens.register_forward_hook(make_inputs_require_grad)
-    elif hasattr(inner, "get_input_embeddings"):
-        inner.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+            raw_model.gradient_checkpointing_enable()
 
 
 def completion_end(seq, prompt_len, eos_token_id):
