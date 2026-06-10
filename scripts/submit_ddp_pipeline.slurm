@@ -57,6 +57,7 @@ MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 SCORE_MICRO_BATCH_SIZE="${SCORE_MICRO_BATCH_SIZE:-1}"
 SCORE_BATCH_SIZE="${SCORE_BATCH_SIZE:-1}"
 SCORE_CHUNK_BACKWARD="${SCORE_CHUNK_BACKWARD:-0}"
+ACCELERATE_TRAIN="${ACCELERATE_TRAIN:-1}"
 EPOCHS="${EPOCHS:-1}"
 NUM_BLOCKS="${NUM_BLOCKS:-16}"
 BLOCK_SIZE="${BLOCK_SIZE:-192}"
@@ -188,6 +189,12 @@ esac
 case "${SCORE_CHUNK_BACKWARD,,}" in
   1|true|yes|on)
     cmd+=(--score_chunk_backward)
+    ;;
+esac
+
+case "${ACCELERATE_TRAIN,,}" in
+  1|true|yes|on)
+    cmd+=(--accelerate_train)
     ;;
 esac
 

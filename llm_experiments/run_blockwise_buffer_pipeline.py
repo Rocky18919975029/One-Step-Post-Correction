@@ -210,6 +210,68 @@ def build_score_command(args, block_idx, output_dir):
 
 
 def build_train_command(args, block_idx, output_dir):
+    if args.accelerate_train and is_scored_buffer(output_dir, block_idx, args):
+        adapter_dir = checkpoint_adapter_dir(output_dir)
+        trainer_args = [
+            sys.executable,
+            "blockwise_accelerate_train.py",
+            "--buffer_path",
+            str(buffer_path(output_dir, block_idx)),
+            "--output_dir",
+            str(output_dir),
+            "--model",
+            args.model,
+            "--block_idx",
+            str(block_idx),
+            "--max_examples",
+            str(args.max_examples),
+            "--batch_size",
+            str(args.batch_size),
+            "--micro_batch_size",
+            str(args.micro_batch_size),
+            "--completions_per_prefix",
+            str(args.completions_per_prefix),
+            "--epochs",
+            str(args.epochs),
+            "--lr",
+            str(args.lr),
+            "--seed",
+            str(args.seed),
+            "--attn_implementation",
+            args.attn_implementation,
+            "--log_every",
+            str(args.wandb_log_every if args.wandb_log_every is not None else 1),
+        ]
+        if block_idx > 1 and adapter_dir.exists():
+            trainer_args.extend(["--adapter_path", str(adapter_dir)])
+        ckpt_dir = checkpoint_dir(output_dir)
+        if ckpt_dir.exists():
+            trainer_args.extend(["--resume_from_checkpoint", str(ckpt_dir)])
+        if args.gradient_checkpointing:
+            trainer_args.append("--gradient_checkpointing")
+        if args.save_every_block:
+            trainer_args.append("--save_every_block")
+        if not args.ddp_train:
+            return trainer_args
+
+        nproc = len(parse_gpu_list(args.train_gpus))
+        if nproc < 2:
+            raise ValueError("--ddp_train requires at least two --train_gpus entries.")
+        return [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--nnodes",
+            "1",
+            "--nproc_per_node",
+            str(nproc),
+            "--master_addr",
+            "127.0.0.1",
+            "--master_port",
+            str(args.train_master_port),
+            *trainer_args[1:],
+        ]
+
     trainer_args = [
         sys.executable,
         "blockwise_power_tb_buffer_train.py",
@@ -410,6 +472,7 @@ def main():
     parser.add_argument("--score_micro_batch_size", type=int, default=None)
     parser.add_argument("--score_batch_size", type=int, default=1)
     parser.add_argument("--score_chunk_backward", action="store_true")
+    parser.add_argument("--accelerate_train", action="store_true")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--num_blocks", type=int, default=None)
     parser.add_argument("--block_size", type=int, default=192)
