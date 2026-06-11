@@ -90,6 +90,7 @@ VLLM_DTYPE="${VLLM_DTYPE:-bfloat16}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.65}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-4096}"
 VLLM_BATCH_SIZE="${VLLM_BATCH_SIZE:-8}"
+VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-1}"
 
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
   TRAIN_MASTER_PORT="${TRAIN_MASTER_PORT:-$((20000 + SLURM_JOB_ID % 10000))}"
@@ -186,9 +187,14 @@ cmd=(
   --vllm_gpu_memory_utilization "$VLLM_GPU_MEMORY_UTILIZATION"
   --vllm_max_model_len "$VLLM_MAX_MODEL_LEN"
   --vllm_batch_size "$VLLM_BATCH_SIZE"
-  --vllm_enforce_eager
   --quiet_debug_logs
 )
+
+case "${VLLM_ENFORCE_EAGER,,}" in
+  1|true|yes|on)
+    cmd+=(--vllm_enforce_eager)
+    ;;
+esac
 
 case "${GRADIENT_CHECKPOINTING,,}" in
   1|true|yes|on)

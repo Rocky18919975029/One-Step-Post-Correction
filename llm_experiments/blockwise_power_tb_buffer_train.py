@@ -337,24 +337,19 @@ def generate_stage_buffer(
                     }
                 )
 
-        future_outputs = []
-        batch_size = max(1, args.vllm_batch_size)
-        for start in tqdm(range(0, len(future_prompts), batch_size), desc=f"block {block_idx} future reward estimation"):
-            batch_prompts = future_prompts[start:start + batch_size]
-            if future_token_budget > 0:
-                outputs = vllm_generate_texts(
-                    llm,
-                    sampling_params_cls,
-                    lora_request,
-                    batch_prompts,
-                    args,
-                    max_tokens=future_token_budget,
-                    n=future_completions_per_partial,
-                    desc=f"block {block_idx} future reward generation",
-                )
-            else:
-                outputs = [[ "" for _ in range(future_completions_per_partial)] for _ in batch_prompts]
-            future_outputs.extend(outputs)
+        if future_token_budget > 0:
+            future_outputs = vllm_generate_texts(
+                llm,
+                sampling_params_cls,
+                lora_request,
+                future_prompts,
+                args,
+                max_tokens=future_token_budget,
+                n=future_completions_per_partial,
+                desc=f"block {block_idx} future reward generation",
+            )
+        else:
+            future_outputs = [["" for _ in range(future_completions_per_partial)] for _ in future_prompts]
     finally:
         del llm
         clear_cuda()
