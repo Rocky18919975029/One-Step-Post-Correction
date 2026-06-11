@@ -221,14 +221,19 @@ def completion_logprob(model, sequences, prompt_lens, attention_masks, eos_token
     output = model(sequences, attention_mask=attention_masks)
     logits = output.logits[:, :-1, :]
     labels = sequences[:, 1:]
-    token_logprobs = F.log_softmax(logits.float(), dim=-1)
-    gathered = token_logprobs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
 
     losses = []
     for row_idx, prompt_len in enumerate(prompt_lens):
         start = max(prompt_len - 1, 0)
         end = completion_end(sequences[row_idx], prompt_len, eos_token_id)
-        losses.append(gathered[row_idx, start:max(end - 1, start)].sum())
+        slice_end = max(end - 1, start)
+        row_logits = logits[row_idx, start:slice_end]
+        if row_logits.numel() == 0:
+            losses.append(row_logits.sum())
+            continue
+        row_labels = labels[row_idx, start:slice_end]
+        row_logprobs = F.log_softmax(row_logits.float(), dim=-1)
+        losses.append(row_logprobs.gather(-1, row_labels.unsqueeze(-1)).squeeze(-1).sum())
     return torch.stack(losses)
 
 
