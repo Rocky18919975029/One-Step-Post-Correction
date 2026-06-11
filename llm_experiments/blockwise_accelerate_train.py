@@ -124,6 +124,14 @@ def completion_token_logprob_padded(model, sequences, prompt_lens, attention_mas
     return padded, mask
 
 
+def completion_token_counts(sequences, prompt_lens, eos_token_id):
+    counts = []
+    for row_idx, prompt_len in enumerate(prompt_lens):
+        end = completion_end(sequences[row_idx], prompt_len, eos_token_id)
+        counts.append(max(int(end) - int(prompt_len), 0))
+    return torch.tensor(counts, dtype=torch.float32, device=sequences.device)
+
+
 def save_accelerate_checkpoint(output_dir, model, tokenizer, optimizer, state, accelerator):
     accelerator.wait_for_everyone()
     if not accelerator.is_main_process:
@@ -291,6 +299,9 @@ def train_scored_block(args):
                         batch["token_logp_ref"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
                         * token_mask.to(token_logp_theta.dtype)
                     ).sum(dim=1)
+                    log_z_hat_metric = (token_z_hat * token_mask_float).sum(dim=1)
+                    target_metric = (token_target * token_mask_float).sum(dim=1)
+                    residual_metric = log_z_hat_metric + logp_theta - target_metric
                 else:
                     logp_theta = completion_logprob(
                         model,
@@ -303,11 +314,28 @@ def train_scored_block(args):
                     target = batch["tb_target"].to(logp_theta.device, dtype=logp_theta.dtype)
                     loss = (log_z_hat + logp_theta - target).pow(2).mean()
                     logp_ref_metric = batch["logp_ref"].to(logp_theta.device).float()
+                    log_z_hat_metric = log_z_hat
+                    target_metric = target
+                    residual_metric = log_z_hat_metric + logp_theta - target_metric
+                    token_counts = completion_token_counts(
+                        batch["input_ids"],
+                        batch["prompt_lens"],
+                        tokenizer.eos_token_id,
+                    )
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
                     global_step += 1
+
+                    safe_token_counts = token_counts.to(logp_theta.device, dtype=logp_theta.dtype).clamp_min(1.0)
+                    logp_theta_per_token = logp_theta / safe_token_counts
+                    logp_ref_per_token = logp_ref_metric.to(logp_theta.device, dtype=logp_theta.dtype) / safe_token_counts
+                    logp_gap = logp_theta - logp_ref_metric.to(logp_theta.device, dtype=logp_theta.dtype)
+                    logp_gap_per_token = logp_theta_per_token - logp_ref_per_token
+                    target_per_token = target_metric.to(logp_theta.device, dtype=logp_theta.dtype) / safe_token_counts
+                    log_z_hat_per_token = log_z_hat_metric.to(logp_theta.device, dtype=logp_theta.dtype) / safe_token_counts
+                    residual_per_token = residual_metric.to(logp_theta.device, dtype=logp_theta.dtype) / safe_token_counts
 
                     gathered = accelerator.gather_for_metrics(
                         torch.stack(
@@ -316,6 +344,18 @@ def train_scored_block(args):
                                 batch["reward"].to(logp_theta.device).float().mean(),
                                 logp_theta.detach().float().mean(),
                                 logp_ref_metric.detach().float().mean(),
+                                token_counts.detach().float().mean(),
+                                logp_theta_per_token.detach().float().mean(),
+                                logp_ref_per_token.detach().float().mean(),
+                                logp_gap.detach().float().mean(),
+                                logp_gap_per_token.detach().float().mean(),
+                                target_metric.detach().float().mean(),
+                                log_z_hat_metric.detach().float().mean(),
+                                residual_metric.detach().float().mean(),
+                                target_per_token.detach().float().mean(),
+                                log_z_hat_per_token.detach().float().mean(),
+                                residual_per_token.detach().float().mean(),
+                                residual_per_token.detach().float().abs().mean(),
                             ]
                         ).unsqueeze(0)
                     )
@@ -329,6 +369,18 @@ def train_scored_block(args):
                         "reward_mean": metric[1],
                         "logp_theta_mean": metric[2],
                         "logp_ref_mean": metric[3],
+                        "completion_tokens_mean": metric[4],
+                        "logp_theta_per_token": metric[5],
+                        "logp_ref_per_token": metric[6],
+                        "logp_gap": metric[7],
+                        "logp_gap_per_token": metric[8],
+                        "target_mean": metric[9],
+                        "log_z_hat_mean": metric[10],
+                        "residual_mean": metric[11],
+                        "target_per_token": metric[12],
+                        "log_z_hat_per_token": metric[13],
+                        "residual_per_token": metric[14],
+                        "residual_abs_per_token": metric[15],
                     }
                     metrics.append(record)
                     progress.update(1)

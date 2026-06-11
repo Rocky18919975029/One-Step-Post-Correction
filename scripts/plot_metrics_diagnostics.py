@@ -16,7 +16,7 @@ def require_matplotlib():
 
 def add_rolling_columns(df, window):
     df = df.copy()
-    for column in ["loss", "reward_mean", "logp_theta_mean", "logp_ref_mean", "logp_gap"]:
+    for column in metric_columns(df):
         if column in df.columns:
             df[f"{column}_roll"] = (
                 df.groupby("block_idx", sort=False)[column]
@@ -25,14 +25,44 @@ def add_rolling_columns(df, window):
     return df
 
 
+def metric_columns(df):
+    candidates = [
+        "loss",
+        "reward_mean",
+        "completion_tokens_mean",
+        "logp_theta_mean",
+        "logp_ref_mean",
+        "logp_gap",
+        "logp_theta_per_token",
+        "logp_ref_per_token",
+        "logp_gap_per_token",
+        "target_mean",
+        "log_z_hat_mean",
+        "residual_mean",
+        "target_per_token",
+        "log_z_hat_per_token",
+        "residual_per_token",
+        "residual_abs_per_token",
+    ]
+    return [column for column in candidates if column in df.columns]
+
+
 def plot_lines(df, output_dir, window):
     plt = require_matplotlib()
     plots = [
         ("loss", "Training loss", "loss_by_step.png"),
         ("reward_mean", "Reward mean", "reward_by_step.png"),
+        ("completion_tokens_mean", "Completion tokens mean", "completion_tokens_by_step.png"),
         ("logp_theta_mean", "Policy logprob mean", "logp_theta_by_step.png"),
         ("logp_ref_mean", "Reference logprob mean", "logp_ref_by_step.png"),
         ("logp_gap", "Policy minus reference logprob", "logp_gap_by_step.png"),
+        ("logp_theta_per_token", "Policy logprob per token", "logp_theta_per_token_by_step.png"),
+        ("logp_ref_per_token", "Reference logprob per token", "logp_ref_per_token_by_step.png"),
+        ("logp_gap_per_token", "Policy minus reference logprob per token", "logp_gap_per_token_by_step.png"),
+        ("target_per_token", "TB target per token", "target_per_token_by_step.png"),
+        ("log_z_hat_per_token", "Estimated log Z per token", "log_z_hat_per_token_by_step.png"),
+        ("residual_per_token", "TB residual per token", "residual_per_token_by_step.png"),
+        ("residual_abs_per_token", "Absolute TB residual per token", "residual_abs_per_token_by_step.png"),
     ]
 
     for column, title, filename in plots:
@@ -56,13 +86,19 @@ def plot_lines(df, output_dir, window):
 
 def plot_combined(df, output_dir, window):
     plt = require_matplotlib()
-    fig, axes = plt.subplots(4, 1, figsize=(14, 14), sharex=True)
     columns = [
         ("loss", "loss"),
         ("reward_mean", "reward_mean"),
+        ("completion_tokens_mean", "completion_tokens_mean"),
         ("logp_theta_mean", "logp_theta_mean"),
         ("logp_gap", "logp_theta_mean - logp_ref_mean"),
+        ("logp_gap_per_token", "logp_gap_per_token"),
+        ("residual_abs_per_token", "residual_abs_per_token"),
     ]
+    columns = [(column, ylabel) for column, ylabel in columns if column in df.columns]
+    fig, axes = plt.subplots(len(columns), 1, figsize=(14, 3.5 * len(columns)), sharex=True)
+    if len(columns) == 1:
+        axes = [axes]
     for ax, (column, ylabel) in zip(axes, columns):
         for block_idx, block_df in df.groupby("block_idx", sort=False):
             roll_col = f"{column}_roll"
@@ -80,8 +116,7 @@ def plot_combined(df, output_dir, window):
 
 def plot_histograms(df, output_dir):
     plt = require_matplotlib()
-    columns = ["loss", "reward_mean", "logp_theta_mean", "logp_ref_mean", "logp_gap"]
-    for column in columns:
+    for column in metric_columns(df):
         if column not in df.columns:
             continue
         fig, ax = plt.subplots(figsize=(10, 5))
@@ -113,13 +148,23 @@ def plot_scatter(df, output_dir):
     fig.savefig(output_dir / "loss_vs_logp_gap.png", dpi=180)
     plt.close(fig)
 
+    if "logp_gap_per_token" not in df.columns:
+        return
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for block_idx, block_df in df.groupby("block_idx", sort=False):
+        ax.scatter(block_df["logp_gap_per_token"], block_df["loss"], s=14, alpha=0.55, label=f"block {block_idx}")
+    ax.set_title("Loss versus per-token policy-reference logprob gap")
+    ax.set_xlabel("logp_theta_per_token - logp_ref_per_token")
+    ax.set_ylabel("loss")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_dir / "loss_vs_logp_gap_per_token.png", dpi=180)
+    plt.close(fig)
+
 
 def write_summaries(df, output_dir):
-    numeric_columns = [
-        column
-        for column in ["loss", "reward_mean", "logp_theta_mean", "logp_ref_mean", "logp_gap"]
-        if column in df.columns
-    ]
+    numeric_columns = metric_columns(df)
     summary = (
         df.groupby("block_idx", sort=False)[numeric_columns]
         .agg(["count", "mean", "std", "min", "median", "max"])
@@ -138,9 +183,10 @@ def write_summaries(df, output_dir):
 
     with (output_dir / "diagnostic_notes.txt").open("w") as handle:
         handle.write("Diagnostics to inspect:\n")
-        handle.write("1. A strongly negative logp_gap means the trained policy assigns lower probability than ref to sampled completions.\n")
-        handle.write("2. A block whose reward_mean is normal but eval collapses likely has an update-scale or target-scale issue.\n")
-        handle.write("3. Compare summary_by_block.csv with last20_mean_by_block.csv to see late-block drift.\n")
+        handle.write("1. Compare per-token logp_gap across blocks before interpreting sequence-level logp_gap.\n")
+        handle.write("2. Sequence-level logprob normally becomes more negative as completion length grows.\n")
+        handle.write("3. A block whose reward_mean is normal but eval collapses likely has an update-scale, target-scale, or reward-mismatch issue.\n")
+        handle.write("4. Compare summary_by_block.csv with last20_mean_by_block.csv to see late-block drift.\n")
 
 
 def main():
