@@ -23,6 +23,7 @@ from blockwise_power_tb_train import (
 
 
 SCORE_COLUMNS = {
+    "ref_policy",
     "logp_ref",
     "logp_theta_score",
     "log_z_hat",
@@ -90,12 +91,15 @@ def score_logprob_columns(df, args):
         attn_implementation=args.attn_implementation,
     )
     actor.eval()
-    ref_model = load_reference_model(
-        model_name,
-        args.torch_dtype,
-        device,
-        attn_implementation=args.attn_implementation,
-    )
+    if args.ref_policy == "old":
+        ref_model = actor
+    else:
+        ref_model = load_reference_model(
+            model_name,
+            args.torch_dtype,
+            device,
+            attn_implementation=args.attn_implementation,
+        )
 
     logp_ref_values = torch.empty(len(df), dtype=torch.float64)
     logp_theta_values = torch.empty(len(df), dtype=torch.float64)
@@ -163,6 +167,7 @@ def score_logprob_columns(df, args):
 
 
 def add_targets_and_z(df, args):
+    df["ref_policy"] = args.ref_policy
     df["tb_target"] = args.alpha * df["logp_ref"] + df["reward"].astype(float) / args.beta
     log_z_terms = args.alpha * df["logp_ref"] - df["logp_theta_score"] + df["reward"].astype(float) / args.beta
     df["log_z_hat"] = log_z_terms.groupby(df["example_idx"]).transform("mean")
@@ -264,6 +269,8 @@ def run_parallel_score(args, df, buffer_path):
             str(args.beta),
             "--loss_level",
             args.loss_level,
+            "--ref_policy",
+            args.ref_policy,
             "--score_num_workers",
             str(num_workers),
             "--score_shard_idx",
@@ -346,6 +353,7 @@ def main():
     parser.add_argument("--alpha", type=float, default=4.0)
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token"])
+    parser.add_argument("--ref_policy", type=str, default="base", choices=["base", "old"])
     parser.add_argument("--score_num_workers", type=int, default=1)
     parser.add_argument("--score_shard_idx", type=int, default=None)
     parser.add_argument("--score_shard_output", type=str, default=None)

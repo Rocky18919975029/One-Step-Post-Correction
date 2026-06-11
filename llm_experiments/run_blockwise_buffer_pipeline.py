@@ -145,7 +145,7 @@ def is_scored_buffer(output_dir, block_idx, args):
     path = buffer_path(output_dir, block_idx)
     if not is_complete_buffer(output_dir, block_idx, args):
         return False
-    required_score_columns = {"logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
+    required_score_columns = {"ref_policy", "logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
     if getattr(args, "loss_level", "sequence") == "token":
         required_score_columns = required_score_columns | {
             "token_logp_ref",
@@ -156,7 +156,12 @@ def is_scored_buffer(output_dir, block_idx, args):
     try:
         with path.open(newline="") as handle:
             reader = csv.DictReader(handle)
-            return required_score_columns.issubset(set(reader.fieldnames or []))
+            if not required_score_columns.issubset(set(reader.fieldnames or [])):
+                return False
+            for row in reader:
+                if row.get("ref_policy", "base") != args.ref_policy:
+                    return False
+            return True
     except Exception:
         return False
 
@@ -238,6 +243,8 @@ def build_score_command(args, block_idx, output_dir):
         str(args.beta),
         "--loss_level",
         args.loss_level,
+        "--ref_policy",
+        args.ref_policy,
     ]
     adapter_dir = checkpoint_adapter_dir(output_dir)
     if block_idx > 1 and adapter_dir.exists():
@@ -426,6 +433,7 @@ def main():
     parser.add_argument("--score_batch_size", type=int, default=1)
     parser.add_argument("--score_num_workers", type=int, default=None)
     parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token"])
+    parser.add_argument("--ref_policy", type=str, default="base", choices=["base", "old"])
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--num_blocks", type=int, default=None)
     parser.add_argument("--block_size", type=int, default=192)
