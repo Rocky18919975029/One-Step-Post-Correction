@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+SCORE_SCHEMA_VERSION = 2
 
 
 def checkpoint_dir(output_dir):
@@ -145,7 +146,7 @@ def is_scored_buffer(output_dir, block_idx, args):
     path = buffer_path(output_dir, block_idx)
     if not is_complete_buffer(output_dir, block_idx, args):
         return False
-    required_score_columns = {"logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
+    required_score_columns = {"score_version", "logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
     if getattr(args, "loss_level", "sequence") == "token":
         required_score_columns = required_score_columns | {
             "token_logp_ref",
@@ -156,7 +157,12 @@ def is_scored_buffer(output_dir, block_idx, args):
     try:
         with path.open(newline="") as handle:
             reader = csv.DictReader(handle)
-            return required_score_columns.issubset(set(reader.fieldnames or []))
+            if not required_score_columns.issubset(set(reader.fieldnames or [])):
+                return False
+            for row in reader:
+                if int(float(row.get("score_version", 0) or 0)) != SCORE_SCHEMA_VERSION:
+                    return False
+            return True
     except Exception:
         return False
 
