@@ -278,7 +278,12 @@ def train_scored_block(args):
                     token_z_hat = batch["token_log_z_hat"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
                     token_target = batch["token_tb_target"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
                     token_residual = token_z_hat + token_logp_theta - token_target
-                    loss = token_residual[token_mask].pow(2).mean()
+                    token_mask_float = token_mask.to(token_residual.dtype)
+                    token_counts = token_mask_float.sum(dim=1)
+                    valid_rows = token_counts > 0
+                    token_sq = token_residual.pow(2) * token_mask_float
+                    per_row_loss = token_sq.sum(dim=1) / token_counts.clamp_min(1.0)
+                    loss = per_row_loss[valid_rows].mean()
                     logp_theta = (token_logp_theta * token_mask.to(token_logp_theta.dtype)).sum(dim=1)
                     logp_ref_metric = (
                         batch["token_logp_ref"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
