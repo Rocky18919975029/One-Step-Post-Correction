@@ -86,10 +86,16 @@ The most important files are:
   vLLM sampling entrypoint. When multiple sampler GPUs are visible, it shards the dataset into multiple single-GPU workers and merges the resulting CSV shards automatically.
 
 - [`llm_experiments/blockwise_power_tb_buffer_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_power_tb_buffer_train.py)
-  Main training script for offline stage buffers. It also contains:
+  Shared support module for offline stage buffers. It contains:
   - stage buffer generation logic
   - vLLM eval-only path
-  - resume / checkpoint logic
+  - legacy debugging utilities
+
+- [`llm_experiments/blockwise_score_buffer.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_score_buffer.py)
+  Maintained scoring entrypoint. It precomputes reference/policy logprobs, Z estimates, and sequence- or token-level training targets.
+
+- [`llm_experiments/blockwise_accelerate_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_accelerate_train.py)
+  Maintained training entrypoint. It consumes scored buffers and runs the standard Dataset/DataLoader/Accelerate/DDP training loop.
 
 - [`llm_experiments/blockwise_power_tb_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_power_tb_train.py)
   Shared lower-level utility module, not a runnable training entrypoint:
@@ -257,7 +263,7 @@ python run_blockwise_buffer_pipeline.py \
   --max_examples 500 \
   --batch_size 4 \
   --micro_batch_size 2 \
-  --score_micro_batch_size 1 \
+  --score_batch_size 8 \
   --epochs 1 \
   --num_blocks 16 \
   --block_size 192 \
@@ -311,7 +317,7 @@ python run_blockwise_buffer_pipeline.py \
   --max_examples 500 \
   --batch_size 4 \
   --micro_batch_size 1 \
-  --score_micro_batch_size 1 \
+  --score_batch_size 8 \
   --epochs 1 \
   --num_blocks 4 \
   --block_size 192 \
@@ -386,12 +392,12 @@ so training can restart from inside a block rather than repeating the whole bloc
 
 - `batch_size`: optimizer batch size measured in prompts
 - `micro_batch_size`: number of prompts per gradient-accumulation micro-step
-- `score_micro_batch_size`: number of sampled partial completions scored together inside the loss
+- `score_batch_size`: number of sampled partial completions scored together during the precomputed score phase
 
 Practical interpretation:
 
 - `micro_batch_size` mainly affects training memory and throughput
-- `score_micro_batch_size` mainly affects inner loss-scoring memory and throughput
+- `score_batch_size` mainly affects scoring memory and throughput
 - under DDP, `batch_size` is per rank, so global effective prompt batch size is `batch_size * number_of_train_gpus`
 
 ### Logging
@@ -442,14 +448,16 @@ If you want to understand the implementation from top to bottom, this is the mos
 
 1. [`llm_experiments/run_blockwise_buffer_pipeline.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/run_blockwise_buffer_pipeline.py)
 2. [`llm_experiments/blockwise_vllm_sample_buffer.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_vllm_sample_buffer.py)
-3. [`llm_experiments/blockwise_power_tb_buffer_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_power_tb_buffer_train.py)
-4. [`llm_experiments/blockwise_power_tb_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_power_tb_train.py)
+3. [`llm_experiments/blockwise_score_buffer.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_score_buffer.py)
+4. [`llm_experiments/blockwise_accelerate_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_accelerate_train.py)
+5. [`llm_experiments/blockwise_power_tb_train.py`](/Users/zeshenghong/Documents/Codex/2026-06-01/clone-aakaran-reasoning-with-sampling-git/One-Step-Post-Correction/llm_experiments/blockwise_power_tb_train.py)
 
 That order mirrors the actual runtime:
 
 - scheduler
 - sampling
-- offline buffer training
+- precomputed scoring
+- Accelerate/DDP buffer training
 - shared model/loss/checkpoint utilities
 
 ## What Is Not Described Here

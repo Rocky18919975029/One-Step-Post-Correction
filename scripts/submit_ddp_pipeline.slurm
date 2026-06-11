@@ -61,11 +61,8 @@ WANDB_LOG_EVERY="${WANDB_LOG_EVERY:-0}"
 MAX_EXAMPLES="${MAX_EXAMPLES:-}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
-SCORE_MICRO_BATCH_SIZE="${SCORE_MICRO_BATCH_SIZE:-1}"
 SCORE_BATCH_SIZE="${SCORE_BATCH_SIZE:-1}"
 SCORE_NUM_WORKERS="${SCORE_NUM_WORKERS:-}"
-SCORE_CHUNK_BACKWARD="${SCORE_CHUNK_BACKWARD:-0}"
-ACCELERATE_TRAIN="${ACCELERATE_TRAIN:-1}"
 LOSS_LEVEL="${LOSS_LEVEL:-sequence}"
 EPOCHS="${EPOCHS:-1}"
 NUM_BLOCKS="${NUM_BLOCKS:-16}"
@@ -164,7 +161,6 @@ cmd=(
   --prompt_model "$PROMPT_MODEL"
   --batch_size "$BATCH_SIZE"
   --micro_batch_size "$MICRO_BATCH_SIZE"
-  --score_micro_batch_size "$SCORE_MICRO_BATCH_SIZE"
   --score_batch_size "$SCORE_BATCH_SIZE"
   --loss_level "$LOSS_LEVEL"
   --epochs "$EPOCHS"
@@ -201,18 +197,6 @@ esac
 case "${GRADIENT_CHECKPOINTING,,}" in
   1|true|yes|on)
     cmd+=(--gradient_checkpointing)
-    ;;
-esac
-
-case "${SCORE_CHUNK_BACKWARD,,}" in
-  1|true|yes|on)
-    cmd+=(--score_chunk_backward)
-    ;;
-esac
-
-case "${ACCELERATE_TRAIN,,}" in
-  1|true|yes|on)
-    cmd+=(--accelerate_train)
     ;;
 esac
 

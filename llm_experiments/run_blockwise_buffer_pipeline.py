@@ -246,143 +246,50 @@ def build_score_command(args, block_idx, output_dir):
 
 
 def build_train_command(args, block_idx, output_dir):
-    if args.accelerate_train and is_scored_buffer(output_dir, block_idx, args):
-        adapter_dir = checkpoint_adapter_dir(output_dir)
-        trainer_args = [
-            sys.executable,
-            "blockwise_accelerate_train.py",
-            "--buffer_path",
-            str(buffer_path(output_dir, block_idx)),
-            "--output_dir",
-            str(output_dir),
-            "--model",
-            args.model,
-            "--block_idx",
-            str(block_idx),
-            "--max_examples",
-            str(args.max_examples),
-            "--batch_size",
-            str(args.batch_size),
-            "--micro_batch_size",
-            str(args.micro_batch_size),
-            "--completions_per_prefix",
-            str(args.completions_per_prefix),
-            "--epochs",
-            str(args.epochs),
-            "--lr",
-            str(args.lr),
-            "--seed",
-            str(args.seed),
-            "--attn_implementation",
-            args.attn_implementation,
-            "--loss_level",
-            args.loss_level,
-            "--log_every",
-            str(args.wandb_log_every if args.wandb_log_every is not None else 1),
-        ]
-        if block_idx > 1 and adapter_dir.exists():
-            trainer_args.extend(["--adapter_path", str(adapter_dir)])
-        ckpt_dir = checkpoint_dir(output_dir)
-        if ckpt_dir.exists():
-            trainer_args.extend(["--resume_from_checkpoint", str(ckpt_dir)])
-        if args.gradient_checkpointing:
-            trainer_args.append("--gradient_checkpointing")
-        if args.save_every_block:
-            trainer_args.append("--save_every_block")
-        if args.use_wandb:
-            trainer_args.append("--use_wandb")
-        if args.wandb_project is not None:
-            trainer_args.extend(["--wandb_project", args.wandb_project])
-        if args.wandb_entity is not None:
-            trainer_args.extend(["--wandb_entity", args.wandb_entity])
-        if args.wandb_run_name is not None:
-            trainer_args.extend(["--wandb_run_name", args.wandb_run_name])
-        if args.wandb_id is not None:
-            trainer_args.extend(["--wandb_id", args.wandb_id])
-        if args.wandb_resume is not None:
-            trainer_args.extend(["--wandb_resume", args.wandb_resume])
-        if args.wandb_log_every is not None:
-            trainer_args.extend(["--wandb_log_every", str(args.wandb_log_every)])
-        if not args.ddp_train:
-            return trainer_args
-
-        nproc = len(parse_gpu_list(args.train_gpus))
-        if nproc < 2:
-            raise ValueError("--ddp_train requires at least two --train_gpus entries.")
-        return [
-            sys.executable,
-            "-m",
-            "torch.distributed.run",
-            "--nnodes",
-            "1",
-            "--nproc_per_node",
-            str(nproc),
-            "--master_addr",
-            "127.0.0.1",
-            "--master_port",
-            str(args.train_master_port),
-            *trainer_args[1:],
-        ]
-
+    if not is_scored_buffer(output_dir, block_idx, args):
+        raise ValueError(f"Block {block_idx} buffer must be scored before training.")
+    adapter_dir = checkpoint_adapter_dir(output_dir)
     trainer_args = [
         sys.executable,
-        "blockwise_power_tb_buffer_train.py",
-        "--data_path",
-        args.data_path,
-        "--eval_data_path",
-        args.eval_data_path,
+        "blockwise_accelerate_train.py",
+        "--buffer_path",
+        str(buffer_path(output_dir, block_idx)),
+        "--output_dir",
+        str(output_dir),
         "--model",
         args.model,
+        "--block_idx",
+        str(block_idx),
         "--max_examples",
         str(args.max_examples),
         "--batch_size",
         str(args.batch_size),
         "--micro_batch_size",
         str(args.micro_batch_size),
-        "--epochs",
-        str(args.epochs),
-        "--num_blocks",
-        str(block_idx),
-        "--block_size",
-        str(args.block_size),
         "--completions_per_prefix",
         str(args.completions_per_prefix),
-        "--max_completion_tokens",
-        str(args.max_completion_tokens),
-        "--temperature",
-        str(args.temperature),
-        "--alpha",
-        str(args.alpha),
-        "--beta",
-        str(args.beta),
+        "--epochs",
+        str(args.epochs),
         "--lr",
         str(args.lr),
         "--seed",
         str(args.seed),
         "--attn_implementation",
         args.attn_implementation,
-        "--output_dir",
-        str(output_dir),
-        "--skip_buffer_sampling",
-        "--debug_dump_timeout_seconds",
-        str(args.debug_dump_timeout_seconds),
+        "--loss_level",
+        args.loss_level,
+        "--log_every",
+        str(args.wandb_log_every if args.wandb_log_every is not None else 1),
     ]
-    if args.prompt_model is not None:
-        trainer_args.extend(["--prompt_model", args.prompt_model])
+    if block_idx > 1 and adapter_dir.exists():
+        trainer_args.extend(["--adapter_path", str(adapter_dir)])
+    ckpt_dir = checkpoint_dir(output_dir)
+    if ckpt_dir.exists():
+        trainer_args.extend(["--resume_from_checkpoint", str(ckpt_dir)])
     if args.gradient_checkpointing:
         trainer_args.append("--gradient_checkpointing")
-    if args.quiet_debug_logs:
-        trainer_args.append("--quiet_debug_logs")
-    if args.save_samples:
-        trainer_args.append("--save_samples")
     if args.save_every_block:
         trainer_args.append("--save_every_block")
-    if args.score_micro_batch_size is not None:
-        trainer_args.extend(["--score_micro_batch_size", str(args.score_micro_batch_size)])
-    if args.score_chunk_backward:
-        trainer_args.append("--score_chunk_backward")
-    if args.save_every_steps:
-        trainer_args.extend(["--save_every_steps", str(args.save_every_steps)])
     if args.use_wandb:
         trainer_args.append("--use_wandb")
     if args.wandb_project is not None:
@@ -397,9 +304,6 @@ def build_train_command(args, block_idx, output_dir):
         trainer_args.extend(["--wandb_resume", args.wandb_resume])
     if args.wandb_log_every is not None:
         trainer_args.extend(["--wandb_log_every", str(args.wandb_log_every)])
-    ckpt_dir = checkpoint_dir(output_dir)
-    if ckpt_dir.exists():
-        trainer_args.extend(["--resume_from_checkpoint", str(ckpt_dir)])
 
     if not args.ddp_train:
         return trainer_args
@@ -485,8 +389,6 @@ def apply_smoke_defaults(args):
         args.eval_examples = 10
     if args.vllm_batch_size is None:
         args.vllm_batch_size = 2
-    if args.score_micro_batch_size is None:
-        args.score_micro_batch_size = 1
     args.gradient_checkpointing = True
     args.save_samples = True
     args.save_every_block = True
@@ -521,11 +423,8 @@ def main():
     parser.add_argument("--max_examples", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--micro_batch_size", type=int, default=1)
-    parser.add_argument("--score_micro_batch_size", type=int, default=None)
     parser.add_argument("--score_batch_size", type=int, default=1)
     parser.add_argument("--score_num_workers", type=int, default=None)
-    parser.add_argument("--score_chunk_backward", action="store_true")
-    parser.add_argument("--accelerate_train", action="store_true")
     parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token"])
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--num_blocks", type=int, default=None)
@@ -588,8 +487,6 @@ def main():
         raise ValueError("--ddp_train requires --train_gpus with at least two GPUs, e.g. --train_gpus 0,1.")
     if args.ddp_train and args.save_every_steps:
         raise ValueError("--save_every_steps is not supported with --ddp_train yet; use --save_every_block.")
-    if args.loss_level == "token" and not args.accelerate_train:
-        raise ValueError("--loss_level token requires --accelerate_train.")
 
     base_env = os.environ.copy()
     base_env["PYTHONUNBUFFERED"] = "1"

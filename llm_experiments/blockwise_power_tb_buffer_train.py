@@ -890,6 +890,12 @@ def main():
     parser.add_argument("--quiet_debug_logs", action="store_true")
     args = parser.parse_args()
 
+    if not args.eval_only:
+        raise ValueError(
+            "The legacy non-Accelerate training entrypoint has been retired. "
+            "Use run_blockwise_buffer_pipeline.py, which now trains exclusively via blockwise_accelerate_train.py."
+        )
+
     global QUIET_DEBUG_LOGS
     QUIET_DEBUG_LOGS = bool(args.quiet_debug_logs)
 
