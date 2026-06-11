@@ -11,6 +11,8 @@ from blockwise_power_tb_train import evaluate_model, load_lora_model, load_math_
 
 
 def resolve_adapter_path(output_dir, block_idx):
+    if block_idx == "base":
+        return None
     output_dir = Path(output_dir)
     if block_idx == "latest":
         adapter_path = output_dir / "checkpoint_latest" / "adapter"
@@ -24,7 +26,7 @@ def resolve_adapter_path(output_dir, block_idx):
 def main():
     parser = argparse.ArgumentParser(description="Evaluate one saved block adapter without touching the training job.")
     parser.add_argument("--output_dir", type=str, required=True)
-    parser.add_argument("--block_idx", type=str, required=True, help="Block number such as 1, 2, 3, or latest.")
+    parser.add_argument("--block_idx", type=str, required=True, help="Block number such as 1, 2, 3, latest, or base.")
     parser.add_argument("--eval_data_path", type=str, default="data/MATH500.json")
     parser.add_argument("--model", type=str, default="qwen")
     parser.add_argument("--prompt_model", type=str, default=None, choices=["phi", "qwen", "qwen_math", "qwen_math_grpo", "tulu"])
@@ -69,7 +71,7 @@ def main():
     metrics = {
         **metrics,
         "block_idx": args.block_idx,
-        "adapter_path": str(adapter_path),
+        "adapter_path": str(adapter_path) if adapter_path is not None else None,
     }
     eval_dir = output_dir / "eval_runs"
     eval_dir.mkdir(parents=True, exist_ok=True)

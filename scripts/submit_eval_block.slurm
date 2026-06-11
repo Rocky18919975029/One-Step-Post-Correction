@@ -15,6 +15,7 @@ set -euo pipefail
 # Usage:
 #   sbatch --export=ALL,BLOCK_IDX=1 scripts/submit_eval_block.slurm
 #   sbatch --export=ALL,BLOCK_IDX=latest scripts/submit_eval_block.slurm
+#   sbatch --export=ALL,BLOCK_IDX=base scripts/submit_eval_block.slurm
 
 REPO_DIR="${REPO_DIR:-/data/user/zhongal/One-Step-Post-Correction}"
 CONDA_ENV="${CONDA_ENV:-psamp}"
