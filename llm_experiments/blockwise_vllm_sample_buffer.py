@@ -64,6 +64,8 @@ def build_worker_command(args, start_idx, end_idx, output_path):
         str(args.max_examples),
         "--block_size",
         str(args.block_size),
+        "--block_train_mode",
+        args.block_train_mode,
         "--completions_per_prefix",
         str(args.completions_per_prefix),
         "--future_completions_per_partial",
@@ -176,6 +178,7 @@ def main():
     parser.add_argument("--adapter_path", type=str, default=None)
     parser.add_argument("--max_examples", type=int, default=32)
     parser.add_argument("--block_size", type=int, default=192)
+    parser.add_argument("--block_train_mode", type=str, default="cumulative", choices=["cumulative", "incremental"])
     parser.add_argument("--completions_per_prefix", type=int, default=4)
     parser.add_argument("--future_completions_per_partial", type=int, default=None)
     parser.add_argument("--max_completion_tokens", type=int, default=3072)

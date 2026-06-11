@@ -247,8 +247,16 @@ def partial_completion_token_limit(block_idx, args):
 
 def stage_completion_slices(tokenizer, prompt_text, partial_completion, block_idx, args):
     stage_end = partial_completion_token_limit(block_idx, args)
-    stage_start = min(max((block_idx - 1) * args.block_size, 0), stage_end)
     partial_ids = tokenizer.encode(partial_completion, add_special_tokens=False)
+    if getattr(args, "block_train_mode", "cumulative") == "cumulative":
+        return {
+            "prefix_text": prompt_text,
+            "prefix_token_len": len(tokenizer.encode(prompt_text)),
+            "completion": partial_completion,
+            "completion_token_len": len(partial_ids),
+        }
+
+    stage_start = min(max((block_idx - 1) * args.block_size, 0), stage_end)
     prefix_piece_ids = partial_ids[:stage_start]
     completion_ids = partial_ids[stage_start:stage_end]
     prefix_piece = tokenizer.decode(prefix_piece_ids, skip_special_tokens=False) if prefix_piece_ids else ""
@@ -391,28 +399,31 @@ def generate_stage_buffer(
                 first_successful_parsed = future_parsed
 
         reward = 1.0 if any(r > 0 for r in future_rewards) else 0.0
-        records.append(
-            {
-                "block_idx": block_idx,
-                "example_idx": meta["example_idx"],
-                "sample_idx": meta["sample_idx"],
-                "question": meta["question"],
-                "correct_answer": meta["correct_answer"],
-                "prefix_token_len": meta["prefix_token_len"],
-                "prefix_text": meta["prefix_text"],
-                "completion_token_len": meta["completion_token_len"],
-                "completion": meta["completion"],
-                "stage_start_token": meta["stage_start_token"],
-                "stage_end_token": meta["stage_end_token"],
-                "full_partial_completion_token_len": meta["full_partial_completion_token_len"],
-                "full_partial_completion": meta["full_partial_completion"],
-                "parsed_answer": first_successful_parsed,
-                "has_boxed_answer": first_successful_parsed is not None,
-                "reward": reward,
-                "future_reward_mean": float(np.mean(future_rewards)) if future_rewards else 0.0,
-                "future_any_correct": bool(reward > 0),
-            }
-        )
+        record = {
+            "block_idx": block_idx,
+            "example_idx": meta["example_idx"],
+            "sample_idx": meta["sample_idx"],
+            "question": meta["question"],
+            "correct_answer": meta["correct_answer"],
+            "prefix_token_len": meta["prefix_token_len"],
+            "prefix_text": meta["prefix_text"],
+            "completion_token_len": meta["completion_token_len"],
+            "completion": meta["completion"],
+            "parsed_answer": first_successful_parsed,
+            "has_boxed_answer": first_successful_parsed is not None,
+            "reward": reward,
+            "future_reward_mean": float(np.mean(future_rewards)) if future_rewards else 0.0,
+            "future_any_correct": bool(reward > 0),
+        }
+        for key in [
+            "stage_start_token",
+            "stage_end_token",
+            "full_partial_completion_token_len",
+            "full_partial_completion",
+        ]:
+            if key in meta:
+                record[key] = meta[key]
+        records.append(record)
 
     if buffer_path_override is None:
         buffer_dir = output_dir / "buffers"
@@ -467,6 +478,8 @@ def generate_stage_buffer_subprocess(block_idx, args, adapter_path):
         str(args.max_examples),
         "--block_size",
         str(args.block_size),
+        "--block_train_mode",
+        args.block_train_mode,
         "--completions_per_prefix",
         str(args.completions_per_prefix),
         "--max_completion_tokens",
@@ -829,6 +842,7 @@ def main():
     parser.add_argument("--score_chunk_backward", action="store_true")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--block_size", type=int, default=192)
+    parser.add_argument("--block_train_mode", type=str, default="cumulative", choices=["cumulative", "incremental"])
     parser.add_argument("--num_blocks", type=int, default=3)
     parser.add_argument("--completions_per_prefix", type=int, default=4)
     parser.add_argument("--future_completions_per_partial", type=int, default=None)

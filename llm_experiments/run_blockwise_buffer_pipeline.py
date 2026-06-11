@@ -96,7 +96,7 @@ def is_complete_buffer(output_dir, block_idx, args):
             fieldnames = set(reader.fieldnames or [])
             if not required_columns.issubset(fieldnames):
                 return False
-            if block_idx > 1 and not stage_columns.issubset(fieldnames):
+            if args.block_train_mode == "incremental" and block_idx > 1 and not stage_columns.issubset(fieldnames):
                 return False
 
             row_count = 0
@@ -115,7 +115,7 @@ def is_complete_buffer(output_dir, block_idx, args):
                     return False
                 if not (0 <= sample_idx < args.completions_per_prefix):
                     return False
-                if block_idx > 1:
+                if args.block_train_mode == "incremental" and block_idx > 1:
                     try:
                         stage_start = int(row["stage_start_token"])
                         stage_end = int(row["stage_end_token"])
@@ -178,6 +178,8 @@ def build_sampler_command(args, block_idx, output_dir):
         str(args.max_examples),
         "--block_size",
         str(args.block_size),
+        "--block_train_mode",
+        args.block_train_mode,
         "--completions_per_prefix",
         str(args.completions_per_prefix),
         "--future_completions_per_partial",
@@ -528,6 +530,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--num_blocks", type=int, default=None)
     parser.add_argument("--block_size", type=int, default=192)
+    parser.add_argument("--block_train_mode", type=str, default="cumulative", choices=["cumulative", "incremental"])
     parser.add_argument("--completions_per_prefix", type=int, default=4)
     parser.add_argument("--future_completions_per_partial", type=int, default=None)
     parser.add_argument("--max_completion_tokens", type=int, default=3072)
