@@ -250,14 +250,17 @@ def maybe_init_wandb(args, rank, resume_state):
     except ImportError as exc:
         raise ImportError("Install wandb first: pip install wandb") from exc
 
-    run_id = args.wandb_id or (resume_state or {}).get("wandb_id")
+    resume_mode = args.wandb_resume or "allow"
+    run_id = args.wandb_id
+    if run_id is None and resume_mode != "never":
+        run_id = (resume_state or {}).get("wandb_id")
     os.environ.setdefault("WANDB_START_METHOD", "thread")
     run = wandb.init(
         project=args.wandb_project,
         entity=args.wandb_entity or None,
         name=args.wandb_run_name or None,
         id=run_id,
-        resume=args.wandb_resume,
+        resume=resume_mode,
         config=vars(args),
         settings=wandb.Settings(start_method="thread"),
     )
