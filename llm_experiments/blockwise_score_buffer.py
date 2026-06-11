@@ -11,7 +11,7 @@ import torch
 import transformers
 from tqdm import tqdm
 
-from blockwise_power_tb_buffer_train import SCORE_SCHEMA_VERSION, encode_buffer_group
+from blockwise_power_tb_buffer_train import encode_buffer_group
 from blockwise_power_tb_train import (
     completion_logprob,
     completion_end,
@@ -23,7 +23,6 @@ from blockwise_power_tb_train import (
 
 
 SCORE_COLUMNS = {
-    "score_version",
     "logp_ref",
     "logp_theta_score",
     "log_z_hat",
@@ -66,13 +65,6 @@ def parse_float_list(value):
     if isinstance(value, list):
         return [float(x) for x in value]
     return [float(x) for x in json.loads(value)]
-
-
-def has_current_score_columns(df, loss_level):
-    required_columns = SCORE_COLUMNS | (TOKEN_SCORE_COLUMNS if loss_level == "token" else set())
-    if not required_columns.issubset(df.columns):
-        return False
-    return (df["score_version"].astype(float).astype(int) == SCORE_SCHEMA_VERSION).all()
 
 
 def split_bounds(total, num_shards, shard_idx):
@@ -171,7 +163,6 @@ def score_logprob_columns(df, args):
 
 
 def add_targets_and_z(df, args):
-    df["score_version"] = SCORE_SCHEMA_VERSION
     df["tb_target"] = args.alpha * df["logp_ref"] + df["reward"].astype(float) / args.beta
     log_z_terms = args.alpha * df["logp_ref"] - df["logp_theta_score"] + df["reward"].astype(float) / args.beta
     df["log_z_hat"] = log_z_terms.groupby(df["example_idx"]).transform("mean")
@@ -182,9 +173,7 @@ def add_targets_and_z(df, args):
         token_targets = []
         token_z_values = [None] * len(df)
         for row_idx, (ref_values, reward) in enumerate(zip(token_ref_values, df["reward"].astype(float).tolist())):
-            token_count = max(len(ref_values), 1)
-            reward_share = reward / (args.beta * token_count)
-            token_targets.append([args.alpha * ref_value + reward_share for ref_value in ref_values])
+            token_targets.append([args.alpha * ref_value + reward / args.beta for ref_value in ref_values])
 
         for _, group in df.groupby("example_idx", sort=False):
             group_indices = list(group.index)
@@ -195,12 +184,10 @@ def add_targets_and_z(df, args):
                 for row_idx in group_indices:
                     if token_idx < len(token_ref_values[row_idx]):
                         reward = float(df.at[row_idx, "reward"])
-                        token_count = max(len(token_ref_values[row_idx]), 1)
-                        reward_share = reward / (args.beta * token_count)
                         terms.append(
                             args.alpha * token_ref_values[row_idx][token_idx]
                             - token_theta_values[row_idx][token_idx]
-                            + reward_share
+                            + reward / args.beta
                         )
                         present_indices.append(row_idx)
                 mean_value = float(sum(terms) / len(terms))
@@ -328,7 +315,8 @@ def score_buffer(args):
         raise FileNotFoundError(f"Missing buffer: {buffer_path}")
 
     df = pd.read_csv(buffer_path)
-    if has_current_score_columns(df, args.loss_level) and not args.force and args.score_shard_idx is None:
+    required_columns = SCORE_COLUMNS | (TOKEN_SCORE_COLUMNS if args.loss_level == "token" else set())
+    if required_columns.issubset(df.columns) and not args.force and args.score_shard_idx is None:
         print(f"Buffer already has score columns: {buffer_path}", flush=True)
         return
 

@@ -14,11 +14,7 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from blockwise_power_tb_buffer_train import (
-    PRECOMPUTED_SCORE_COLUMNS,
-    PRECOMPUTED_TOKEN_SCORE_COLUMNS,
-    SCORE_SCHEMA_VERSION,
-)
+from blockwise_power_tb_buffer_train import PRECOMPUTED_SCORE_COLUMNS, PRECOMPUTED_TOKEN_SCORE_COLUMNS
 from blockwise_power_tb_train import (
     completion_logprob,
     completion_end,
@@ -32,11 +28,7 @@ from blockwise_power_tb_train import (
 
 
 def has_precomputed_scores(df):
-    if not PRECOMPUTED_SCORE_COLUMNS.issubset(df.columns):
-        return False
-    if not (df["score_version"].astype(float).astype(int) == SCORE_SCHEMA_VERSION).all():
-        return False
-    return not df[list(PRECOMPUTED_SCORE_COLUMNS)].isna().any().any()
+    return PRECOMPUTED_SCORE_COLUMNS.issubset(df.columns) and not df[list(PRECOMPUTED_SCORE_COLUMNS)].isna().any().any()
 
 
 def has_precomputed_token_scores(df):
