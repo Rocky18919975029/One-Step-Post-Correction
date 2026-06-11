@@ -190,6 +190,7 @@ def build_sampler_command(args, block_idx, output_dir):
 
 
 def build_score_command(args, block_idx, output_dir):
+    score_workers = args.score_num_workers or len(parse_gpu_list(args.train_gpus))
     command = [
         sys.executable,
         "blockwise_score_buffer.py",
@@ -203,6 +204,8 @@ def build_score_command(args, block_idx, output_dir):
         args.attn_implementation,
         "--score_batch_size",
         str(args.score_batch_size),
+        "--score_num_workers",
+        str(max(1, score_workers)),
         "--completions_per_prefix",
         str(args.completions_per_prefix),
         "--alpha",
@@ -496,6 +499,7 @@ def main():
     parser.add_argument("--micro_batch_size", type=int, default=1)
     parser.add_argument("--score_micro_batch_size", type=int, default=None)
     parser.add_argument("--score_batch_size", type=int, default=1)
+    parser.add_argument("--score_num_workers", type=int, default=None)
     parser.add_argument("--score_chunk_backward", action="store_true")
     parser.add_argument("--accelerate_train", action="store_true")
     parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token"])
@@ -582,7 +586,7 @@ def main():
         train_env.setdefault("NCCL_IB_DISABLE", "1")
 
     score_env = base_env.copy()
-    score_env["CUDA_VISIBLE_DEVICES"] = parse_gpu_list(args.train_gpus)[0]
+    score_env["CUDA_VISIBLE_DEVICES"] = args.train_gpus
     score_env["MASTER_PORT"] = str(args.train_master_port + 2)
 
     start_block = read_next_block_idx(output_dir)
