@@ -124,6 +124,13 @@ def is_scored_buffer(output_dir, block_idx, args):
     if not is_complete_buffer(output_dir, block_idx, args):
         return False
     required_score_columns = {"logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
+    if getattr(args, "loss_level", "sequence") == "token":
+        required_score_columns = required_score_columns | {
+            "token_logp_ref",
+            "token_logp_theta_score",
+            "token_log_z_hat",
+            "token_tb_target",
+        }
     try:
         with path.open(newline="") as handle:
             reader = csv.DictReader(handle)
@@ -202,6 +209,8 @@ def build_score_command(args, block_idx, output_dir):
         str(args.alpha),
         "--beta",
         str(args.beta),
+        "--loss_level",
+        args.loss_level,
     ]
     adapter_dir = checkpoint_adapter_dir(output_dir)
     if block_idx > 1 and adapter_dir.exists():
@@ -239,6 +248,8 @@ def build_train_command(args, block_idx, output_dir):
             str(args.seed),
             "--attn_implementation",
             args.attn_implementation,
+            "--loss_level",
+            args.loss_level,
             "--log_every",
             str(args.wandb_log_every if args.wandb_log_every is not None else 1),
         ]
@@ -487,6 +498,7 @@ def main():
     parser.add_argument("--score_batch_size", type=int, default=1)
     parser.add_argument("--score_chunk_backward", action="store_true")
     parser.add_argument("--accelerate_train", action="store_true")
+    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token"])
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--num_blocks", type=int, default=None)
     parser.add_argument("--block_size", type=int, default=192)
@@ -547,6 +559,8 @@ def main():
         raise ValueError("--ddp_train requires --train_gpus with at least two GPUs, e.g. --train_gpus 0,1.")
     if args.ddp_train and args.save_every_steps:
         raise ValueError("--save_every_steps is not supported with --ddp_train yet; use --save_every_block.")
+    if args.loss_level == "token" and not args.accelerate_train:
+        raise ValueError("--loss_level token requires --accelerate_train.")
 
     base_env = os.environ.copy()
     base_env["PYTHONUNBUFFERED"] = "1"

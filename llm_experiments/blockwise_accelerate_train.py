@@ -1,4 +1,5 @@
 import argparse
+import json
 import math
 import random
 import shutil
@@ -7,14 +8,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 import transformers
 from accelerate import Accelerator
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from blockwise_power_tb_buffer_train import PRECOMPUTED_SCORE_COLUMNS
+from blockwise_power_tb_buffer_train import PRECOMPUTED_SCORE_COLUMNS, PRECOMPUTED_TOKEN_SCORE_COLUMNS
 from blockwise_power_tb_train import (
     completion_logprob,
+    completion_end,
     enable_gradient_checkpointing,
     load_lora_model,
     maybe_init_wandb,
@@ -26,6 +29,16 @@ from blockwise_power_tb_train import (
 
 def has_precomputed_scores(df):
     return PRECOMPUTED_SCORE_COLUMNS.issubset(df.columns) and not df[list(PRECOMPUTED_SCORE_COLUMNS)].isna().any().any()
+
+
+def has_precomputed_token_scores(df):
+    return PRECOMPUTED_TOKEN_SCORE_COLUMNS.issubset(df.columns) and not df[list(PRECOMPUTED_TOKEN_SCORE_COLUMNS)].isna().any().any()
+
+
+def parse_float_list(value):
+    if isinstance(value, list):
+        return [float(x) for x in value]
+    return [float(x) for x in json.loads(value)]
 
 
 class ScoredBufferDataset(Dataset):
@@ -45,14 +58,15 @@ class ScoredBufferDataset(Dataset):
 
 
 class ScoredBufferCollator:
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, loss_level):
         self.tokenizer = tokenizer
+        self.loss_level = loss_level
 
     def __call__(self, examples):
         rows = list(examples)
         texts = [str(row["prefix_text"]) + str(row["completion"]) for row in rows]
         encoded = self.tokenizer(texts, padding=True, return_tensors="pt")
-        return {
+        batch = {
             "input_ids": encoded["input_ids"],
             "attention_mask": encoded["attention_mask"],
             "prompt_lens": [int(row["prefix_token_len"]) for row in rows],
@@ -61,6 +75,53 @@ class ScoredBufferCollator:
             "logp_ref": torch.tensor([float(row["logp_ref"]) for row in rows], dtype=torch.float32),
             "reward": torch.tensor([float(row["reward"]) for row in rows], dtype=torch.float32),
         }
+        if self.loss_level == "token":
+            token_z = [parse_float_list(row["token_log_z_hat"]) for row in rows]
+            token_target = [parse_float_list(row["token_tb_target"]) for row in rows]
+            token_ref = [parse_float_list(row["token_logp_ref"]) for row in rows]
+            max_len = max(len(values) for values in token_target) if token_target else 0
+            token_mask = torch.zeros((len(rows), max_len), dtype=torch.bool)
+            token_z_tensor = torch.zeros((len(rows), max_len), dtype=torch.float32)
+            token_target_tensor = torch.zeros((len(rows), max_len), dtype=torch.float32)
+            token_ref_tensor = torch.zeros((len(rows), max_len), dtype=torch.float32)
+            for row_idx, (z_values, target_values, ref_values) in enumerate(zip(token_z, token_target, token_ref)):
+                length = len(target_values)
+                token_mask[row_idx, :length] = True
+                token_z_tensor[row_idx, :length] = torch.tensor(z_values, dtype=torch.float32)
+                token_target_tensor[row_idx, :length] = torch.tensor(target_values, dtype=torch.float32)
+                token_ref_tensor[row_idx, :length] = torch.tensor(ref_values, dtype=torch.float32)
+            batch.update(
+                {
+                    "token_log_z_hat": token_z_tensor,
+                    "token_tb_target": token_target_tensor,
+                    "token_logp_ref": token_ref_tensor,
+                    "token_mask": token_mask,
+                }
+            )
+        return batch
+
+
+def completion_token_logprob_padded(model, sequences, prompt_lens, attention_masks, eos_token_id, target_width):
+    output = model(sequences, attention_mask=attention_masks)
+    logits = output.logits[:, :-1, :]
+    labels = sequences[:, 1:]
+    padded = logits.new_zeros((sequences.shape[0], target_width), dtype=torch.float32)
+    mask = torch.zeros((sequences.shape[0], target_width), dtype=torch.bool, device=sequences.device)
+
+    for row_idx, prompt_len in enumerate(prompt_lens):
+        start = max(prompt_len - 1, 0)
+        end = completion_end(sequences[row_idx], prompt_len, eos_token_id)
+        slice_end = min(max(end - 1, start), start + target_width)
+        row_logits = logits[row_idx, start:slice_end]
+        if row_logits.numel() == 0:
+            continue
+        row_labels = labels[row_idx, start:slice_end]
+        row_logprobs = F.log_softmax(row_logits.float(), dim=-1)
+        gathered = row_logprobs.gather(-1, row_labels.unsqueeze(-1)).squeeze(-1)
+        length = gathered.shape[0]
+        padded[row_idx, :length] = gathered
+        mask[row_idx, :length] = True
+    return padded, mask
 
 
 def save_accelerate_checkpoint(output_dir, model, tokenizer, optimizer, state, accelerator):
@@ -140,9 +201,14 @@ def train_scored_block(args):
         raise FileNotFoundError(f"Missing scored buffer: {buffer_path}")
 
     buffer_df = pd.read_csv(buffer_path)
-    if not has_precomputed_scores(buffer_df):
+    if args.loss_level == "token":
+        required = PRECOMPUTED_SCORE_COLUMNS | PRECOMPUTED_TOKEN_SCORE_COLUMNS
+        if not (has_precomputed_scores(buffer_df) and has_precomputed_token_scores(buffer_df)):
+            missing = sorted(required.difference(buffer_df.columns))
+            raise ValueError(f"Buffer is not token-scored. Missing/invalid columns: {missing or sorted(required)}")
+    elif not has_precomputed_scores(buffer_df):
         missing = sorted(PRECOMPUTED_SCORE_COLUMNS.difference(buffer_df.columns))
-        raise ValueError(f"Buffer is not pre-scored. Missing/invalid columns: {missing or sorted(PRECOMPUTED_SCORE_COLUMNS)}")
+        raise ValueError(f"Buffer is not sequence-scored. Missing/invalid columns: {missing or sorted(PRECOMPUTED_SCORE_COLUMNS)}")
 
     if args.max_examples is not None:
         allowed = set(buffer_df["example_idx"].drop_duplicates().head(args.max_examples))
@@ -154,7 +220,7 @@ def train_scored_block(args):
         tokenizer.pad_token = tokenizer.eos_token
 
     dataset = ScoredBufferDataset(buffer_df, args.completions_per_prefix)
-    collator = ScoredBufferCollator(tokenizer)
+    collator = ScoredBufferCollator(tokenizer, args.loss_level)
     dataloader = DataLoader(
         dataset,
         batch_size=args.micro_batch_size,
@@ -198,16 +264,38 @@ def train_scored_block(args):
         )
         for batch_idx, batch in enumerate(dataloader):
             with accelerator.accumulate(model):
-                logp_theta = completion_logprob(
-                    model,
-                    batch["input_ids"],
-                    batch["prompt_lens"],
-                    batch["attention_mask"],
-                    tokenizer.eos_token_id,
-                )
-                log_z_hat = batch["log_z_hat"].to(logp_theta.device, dtype=logp_theta.dtype)
-                target = batch["tb_target"].to(logp_theta.device, dtype=logp_theta.dtype)
-                loss = (log_z_hat + logp_theta - target).pow(2).mean()
+                if args.loss_level == "token":
+                    token_mask = batch["token_mask"].to(batch["input_ids"].device)
+                    token_logp_theta, model_token_mask = completion_token_logprob_padded(
+                        model,
+                        batch["input_ids"],
+                        batch["prompt_lens"],
+                        batch["attention_mask"],
+                        tokenizer.eos_token_id,
+                        batch["token_tb_target"].shape[1],
+                    )
+                    token_mask = token_mask & model_token_mask
+                    token_z_hat = batch["token_log_z_hat"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
+                    token_target = batch["token_tb_target"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
+                    token_residual = token_z_hat + token_logp_theta - token_target
+                    loss = token_residual[token_mask].pow(2).mean()
+                    logp_theta = (token_logp_theta * token_mask.to(token_logp_theta.dtype)).sum(dim=1)
+                    logp_ref_metric = (
+                        batch["token_logp_ref"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
+                        * token_mask.to(token_logp_theta.dtype)
+                    ).sum(dim=1)
+                else:
+                    logp_theta = completion_logprob(
+                        model,
+                        batch["input_ids"],
+                        batch["prompt_lens"],
+                        batch["attention_mask"],
+                        tokenizer.eos_token_id,
+                    )
+                    log_z_hat = batch["log_z_hat"].to(logp_theta.device, dtype=logp_theta.dtype)
+                    target = batch["tb_target"].to(logp_theta.device, dtype=logp_theta.dtype)
+                    loss = (log_z_hat + logp_theta - target).pow(2).mean()
+                    logp_ref_metric = batch["logp_ref"].to(logp_theta.device).float()
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     optimizer.step()
@@ -220,7 +308,7 @@ def train_scored_block(args):
                                 loss.detach().float(),
                                 batch["reward"].to(logp_theta.device).float().mean(),
                                 logp_theta.detach().float().mean(),
-                                batch["logp_ref"].to(logp_theta.device).float().mean(),
+                                logp_ref_metric.detach().float().mean(),
                             ]
                         ).unsqueeze(0)
                     )
@@ -229,6 +317,7 @@ def train_scored_block(args):
                         "step": global_step,
                         "epoch": epoch,
                         "block_idx": args.block_idx,
+                        "loss_level": args.loss_level,
                         "loss": metric[0],
                         "reward_mean": metric[1],
                         "logp_theta_mean": metric[2],
@@ -292,6 +381,7 @@ def main():
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
     parser.add_argument("--start_step", type=int, default=0)
     parser.add_argument("--log_every", type=int, default=1)
+    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token"])
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="one-step-post-correction")
     parser.add_argument("--wandb_entity", type=str, default=None)

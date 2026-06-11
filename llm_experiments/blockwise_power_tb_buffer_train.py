@@ -46,6 +46,7 @@ from power_samp_utils import format_prompt
 DEBUG_HANDLE = None
 QUIET_DEBUG_LOGS = False
 PRECOMPUTED_SCORE_COLUMNS = {"logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
+PRECOMPUTED_TOKEN_SCORE_COLUMNS = {"token_logp_ref", "token_logp_theta_score", "token_log_z_hat", "token_tb_target"}
 
 
 def resolve_data_path(path):
