@@ -1,11 +1,7 @@
 import argparse
 import faulthandler
 import gc
-import inspect
-import json
 import os
-import random
-import subprocess
 import sys
 import traceback
 from datetime import datetime
@@ -14,31 +10,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 import transformers
 from tqdm import tqdm
 
 from blockwise_power_tb_train import (
     MODEL_NAME_BY_KEY,
-    completion_end,
-    completion_logprob,
-    enable_gradient_checkpointing,
     evaluate_model,
-    load_checkpoint_state,
     load_lora_model,
     load_math_dataset,
-    load_reference_model,
     maybe_init_wandb,
     resolve_model_name,
     resolve_prompt_model_key,
-    save_checkpoint,
     score_completion,
     seed_everything,
-    sync_cuda_if_available,
-    unwrap_model,
-    vargrad_tb_loss,
-    vargrad_tb_loss_with_score_chunk_backward,
 )
 from power_samp_utils import format_prompt
 
@@ -49,61 +33,11 @@ PRECOMPUTED_SCORE_COLUMNS = {"logp_ref", "logp_theta_score", "log_z_hat", "tb_ta
 PRECOMPUTED_TOKEN_SCORE_COLUMNS = {"token_logp_ref", "token_logp_theta_score", "token_log_z_hat", "token_tb_target"}
 
 
-def resolve_data_path(path):
-    path = Path(path)
-    if path.exists():
-        return path
-    return Path(__file__).resolve().parent / path
-
-
 def clear_cuda():
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
-
-
-def init_distributed_from_env():
-    world_size = int(os.environ.get("WORLD_SIZE", "1") or 1)
-    if world_size <= 1:
-        device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-        return 0, 0, 1, device, False
-
-    if not torch.cuda.is_available():
-        raise RuntimeError("DDP training requires CUDA devices.")
-
-    rank = int(os.environ["RANK"])
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
-    return rank, local_rank, world_size, torch.device(f"cuda:{local_rank}"), True
-
-
-def cleanup_distributed(distributed):
-    if distributed and dist.is_initialized():
-        dist.destroy_process_group()
-
-
-def reduce_metric_values(values, device, distributed):
-    tensor = torch.tensor(values, dtype=torch.float64, device=device)
-    if distributed:
-        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
-    return tensor.detach().cpu().tolist()
-
-
-def wrap_model_for_ddp(model, local_rank):
-    ddp_kwargs = {
-        "device_ids": [local_rank],
-        "output_device": local_rank,
-        "broadcast_buffers": False,
-        "find_unused_parameters": False,
-    }
-    ddp_signature = inspect.signature(DDP)
-    if "gradient_as_bucket_view" in ddp_signature.parameters:
-        ddp_kwargs["gradient_as_bucket_view"] = True
-    if "init_sync" in ddp_signature.parameters:
-        ddp_kwargs["init_sync"] = False
-    return DDP(model, **ddp_kwargs)
 
 
 def setup_debug_file(output_dir, name, dump_timeout_seconds=0):
@@ -140,64 +74,7 @@ def debug_log(message, rank=None, always=False):
 
 
 def log_point(label, rank=0):
-    debug_log(f"{label}", rank=rank, always=True)
-
-
-def should_log_wandb_step(args, step):
-    if args.wandb_log_every <= 0:
-        return False
-    return args.wandb_log_every == 1 or step % args.wandb_log_every == 0
-
-
-def has_precomputed_scores(df):
-    return PRECOMPUTED_SCORE_COLUMNS.issubset(df.columns)
-
-
-def dump_micro_batch_debug(output_dir, block_idx, rank, step_id, micro_start, micro_indices, micro_df, prompt_lens, sequences):
-    debug_dir = Path(output_dir) / "debug_logs" / "micro_batches"
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"block{block_idx}_rank{rank}_step{step_id}_micro{micro_start}"
-    micro_df.to_csv(debug_dir / f"{stem}.csv", index=False)
-    meta = {
-        "block_idx": block_idx,
-        "rank": rank,
-        "step": step_id,
-        "micro_start": micro_start,
-        "example_indices": [int(idx) for idx in micro_indices],
-        "rows": int(len(micro_df)),
-        "seq_shape": tuple(int(x) for x in sequences.shape),
-        "prompt_lens": [int(x) for x in prompt_lens],
-    }
-    torch.save(meta, debug_dir / f"{stem}.pt")
-
-
-def write_active_loss_debug(output_dir, block_idx, rank, step_id, micro_start, phase, chunk_start, chunk_end, micro_df, prompt_lens, sequences):
-    debug_dir = Path(output_dir) / "debug_logs" / "active_loss"
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "block_idx": int(block_idx),
-        "rank": int(rank),
-        "step": int(step_id),
-        "micro_start": int(micro_start),
-        "phase": str(phase),
-        "chunk_start": int(chunk_start),
-        "chunk_end": int(chunk_end),
-        "rows": int(len(micro_df)),
-        "seq_shape": [int(x) for x in sequences.shape],
-        "prompt_lens": [int(x) for x in prompt_lens],
-        "example_indices": [int(x) for x in micro_df["example_idx"].tolist()],
-        "sample_indices": [int(x) for x in micro_df["sample_idx"].tolist()],
-        "prefix_token_lens": [int(x) for x in micro_df["prefix_token_len"].tolist()],
-        "completion_token_lens": [int(x) for x in micro_df["completion_token_len"].tolist()],
-        "rewards": [float(x) for x in micro_df["reward"].tolist()],
-    }
-    rank_path = debug_dir / f"rank{rank}.json"
-    all_ranks_path = debug_dir / "latest_by_rank.jsonl"
-    with rank_path.open("w") as handle:
-        json.dump(payload, handle, indent=2)
-        handle.write("\n")
-    with all_ranks_path.open("a") as handle:
-        handle.write(json.dumps(payload) + "\n")
+    debug_log(label, rank=rank, always=True)
 
 
 def load_vllm(model_name, args, adapter_path=None):
@@ -437,99 +314,6 @@ def generate_stage_buffer(
     return buffer_path
 
 
-def vllm_subprocess_env(args):
-    env = os.environ.copy()
-    for key in [
-        "RANK",
-        "LOCAL_RANK",
-        "WORLD_SIZE",
-        "GROUP_RANK",
-        "ROLE_RANK",
-        "ROLE_WORLD_SIZE",
-        "LOCAL_WORLD_SIZE",
-        "MASTER_ADDR",
-        "MASTER_PORT",
-        "TORCHELASTIC_RUN_ID",
-        "TORCHELASTIC_MAX_RESTARTS",
-    ]:
-        env.pop(key, None)
-    env["TORCHELASTIC_RESTART_COUNT"] = "0"
-
-    if args.vllm_visible_devices:
-        env["CUDA_VISIBLE_DEVICES"] = args.vllm_visible_devices
-    elif args.vllm_tensor_parallel_size == 1 and env.get("CUDA_VISIBLE_DEVICES"):
-        env["CUDA_VISIBLE_DEVICES"] = env["CUDA_VISIBLE_DEVICES"].split(",")[0]
-    return env
-
-
-def generate_stage_buffer_subprocess(block_idx, args, adapter_path):
-    command = [
-        sys.executable,
-        "blockwise_vllm_sample_buffer.py",
-        "--data_path",
-        args.data_path,
-        "--output_dir",
-        args.output_dir,
-        "--model",
-        args.model,
-        "--block_idx",
-        str(block_idx),
-        "--max_examples",
-        str(args.max_examples),
-        "--block_size",
-        str(args.block_size),
-        "--block_train_mode",
-        args.block_train_mode,
-        "--completions_per_prefix",
-        str(args.completions_per_prefix),
-        "--max_completion_tokens",
-        str(args.max_completion_tokens),
-        "--temperature",
-        str(args.temperature),
-        "--seed",
-        str(args.seed),
-        "--vllm_dtype",
-        args.vllm_dtype,
-        "--vllm_tensor_parallel_size",
-        str(args.vllm_tensor_parallel_size),
-        "--vllm_gpu_memory_utilization",
-        str(args.vllm_gpu_memory_utilization),
-        "--vllm_max_model_len",
-        str(args.vllm_max_model_len),
-        "--vllm_batch_size",
-        str(args.vllm_batch_size),
-    ]
-    if args.vllm_enforce_eager:
-        command.append("--vllm_enforce_eager")
-    if args.vllm_disable_custom_all_reduce:
-        command.append("--vllm_disable_custom_all_reduce")
-    if adapter_path is not None:
-        command.extend(["--adapter_path", str(adapter_path)])
-
-    env = vllm_subprocess_env(args)
-    print("Launching vLLM sampler:", " ".join(command), flush=True)
-    print("vLLM CUDA_VISIBLE_DEVICES:", env.get("CUDA_VISIBLE_DEVICES"), flush=True)
-    subprocess.run(command, cwd=Path(__file__).resolve().parent, env=env, check=True)
-
-
-def build_checkpoint_state(args, wandb_run, global_step, next_block_idx, current_block_idx=None, resume_epoch=None, resume_batch_start=None, resume_rank_order=None):
-    state = {
-        "next_block_idx": next_block_idx,
-        "global_step": global_step,
-        "wandb_id": wandb_run.id if wandb_run is not None else args.wandb_id,
-        "args": vars(args),
-    }
-    if current_block_idx is not None:
-        state["current_block_idx"] = current_block_idx
-    if resume_epoch is not None:
-        state["resume_epoch"] = resume_epoch
-    if resume_batch_start is not None:
-        state["resume_batch_start"] = resume_batch_start
-    if resume_rank_order is not None:
-        state["resume_rank_order"] = list(resume_rank_order)
-    return state
-
-
 def encode_buffer_group(tokenizer, rows, device):
     sequences = []
     prompt_lens = []
@@ -559,306 +343,24 @@ def encode_buffer_group(tokenizer, rows, device):
     )
 
 
-def train_stage_from_buffer(
-    model,
-    ref_model,
-    tokenizer,
-    optimizer,
-    buffer_df,
-    dataset,
-    block_idx,
-    args,
-    rank,
-    world_size,
-    global_step,
-    metrics,
-    sample_records,
-    wandb_run,
-    resume_block_state=None,
-    checkpoint_callback=None,
-):
-    default_order = list(range(len(dataset)))
-    use_precomputed_scores = has_precomputed_scores(buffer_df)
-    if use_precomputed_scores:
-        debug_log(f"[block {block_idx}] using precomputed score columns for training loss", rank=rank, always=(rank == 0))
-    resume_rank_order = None
-    start_epoch = 0
-    resume_batch_start = 0
-    if resume_block_state is not None and int(resume_block_state.get("current_block_idx", -1)) == block_idx:
-        resume_rank_order = resume_block_state.get("resume_rank_order")
-        start_epoch = int(resume_block_state.get("resume_epoch", 0))
-        resume_batch_start = int(resume_block_state.get("resume_batch_start", 0) or 0)
-
-    for epoch in range(start_epoch, args.epochs):
-        if epoch == start_epoch and resume_rank_order is not None:
-            rank_order = list(resume_rank_order)
-        else:
-            rank_order = list(default_order)
-            order_rng = random.Random(args.seed + block_idx * 100000 + epoch)
-            order_rng.shuffle(rank_order)
-        if world_size > 1:
-            remainder = len(rank_order) % world_size
-            if remainder:
-                rank_order.extend(rank_order[: world_size - remainder])
-            rank_order = rank_order[rank::world_size]
-        epoch_batch_start = resume_batch_start if epoch == start_epoch and resume_rank_order is not None else 0
-
-        batch_iter = range(epoch_batch_start, len(rank_order), args.batch_size)
-        if rank == 0 and not args.disable_tqdm:
-            batch_iter = tqdm(batch_iter, desc=f"block {block_idx} epoch {epoch}")
-        for start in batch_iter:
-            batch_indices = rank_order[start:start + args.batch_size]
-            optimizer.zero_grad(set_to_none=True)
-            step_id = global_step + 1
-            debug_log(
-                f"[block {block_idx}] step {step_id} begin epoch={epoch} batch_start={start} batch_size={len(batch_indices)}",
-                rank=rank,
-            )
-
-            loss_sum = 0.0
-            reward_sum = 0.0
-            logp_theta_sum = 0.0
-            logp_ref_sum = 0.0
-            total_sequences = len(batch_indices) * args.completions_per_prefix
-
-            for micro_start in range(0, len(batch_indices), args.micro_batch_size):
-                micro_indices = batch_indices[micro_start:micro_start + args.micro_batch_size]
-                debug_log(
-                    f"[block {block_idx}] step {step_id} micro begin micro_start={micro_start} micro_size={len(micro_indices)}",
-                    rank=rank,
-                )
-                micro_rows = []
-                for example_idx in micro_indices:
-                    rows = buffer_df[buffer_df["example_idx"] == example_idx].sort_values("sample_idx")
-                    if len(rows) < args.completions_per_prefix:
-                        rows = rows.sample(
-                            n=args.completions_per_prefix,
-                            replace=True,
-                            random_state=args.seed + block_idx + example_idx,
-                        ).sort_values("sample_idx")
-                    else:
-                        rows = rows.head(args.completions_per_prefix)
-                    micro_rows.append(rows)
-                micro_df = pd.concat(micro_rows, ignore_index=True)
-
-                sequences, prompt_lens, attention_masks, rewards = encode_buffer_group(
-                    tokenizer,
-                    micro_df,
-                    next(unwrap_model(model).parameters()).device,
-                )
-                if not args.disable_micro_batch_debug_dump:
-                    dump_micro_batch_debug(
-                        args.output_dir,
-                        block_idx,
-                        rank,
-                        step_id,
-                        micro_start,
-                        micro_indices,
-                        micro_df,
-                        prompt_lens,
-                        sequences,
-                    )
-                debug_log(
-                    f"[block {block_idx}] step {step_id} micro prepared rows={len(micro_df)} seq_shape={tuple(sequences.shape)} max_prompt_len={max(prompt_lens)} reward_mean={float(rewards.mean().detach().cpu()):.4f}",
-                    rank=rank,
-                )
-                micro_sequences = len(micro_df)
-                if use_precomputed_scores:
-                    debug_log(f"[block {block_idx}] step {step_id} precomputed loss forward begin", rank=rank)
-                    logp_theta = completion_logprob(
-                        model,
-                        sequences,
-                        prompt_lens,
-                        attention_masks,
-                        tokenizer.eos_token_id,
-                    )
-                    log_z_hat = torch.tensor(
-                        micro_df["log_z_hat"].astype(float).to_numpy(),
-                        dtype=torch.float32,
-                        device=sequences.device,
-                    )
-                    target = torch.tensor(
-                        micro_df["tb_target"].astype(float).to_numpy(),
-                        dtype=torch.float32,
-                        device=sequences.device,
-                    )
-                    logp_ref = torch.tensor(
-                        micro_df["logp_ref"].astype(float).to_numpy(),
-                        dtype=torch.float32,
-                        device=sequences.device,
-                    )
-                    loss = (log_z_hat + logp_theta - target).pow(2).mean()
-                    debug_log(f"[block {block_idx}] step {step_id} precomputed loss forward end", rank=rank)
-                    debug_log(f"[block {block_idx}] step {step_id} backward begin", rank=rank)
-                    (loss * (micro_sequences / total_sequences)).backward()
-                    sync_cuda_if_available()
-                    debug_log(f"[block {block_idx}] step {step_id} backward end", rank=rank)
-                elif args.score_chunk_backward:
-                    debug_log(f"[block {block_idx}] step {step_id} score chunk loss/backward begin", rank=rank)
-                    def active_loss_callback(phase, chunk_start, chunk_end):
-                        write_active_loss_debug(
-                            args.output_dir,
-                            block_idx,
-                            rank,
-                            step_id,
-                            micro_start,
-                            phase,
-                            chunk_start,
-                            chunk_end,
-                            micro_df,
-                            prompt_lens,
-                            sequences,
-                        )
-
-                    loss, logp_theta, logp_ref = vargrad_tb_loss_with_score_chunk_backward(
-                        model,
-                        tokenizer,
-                        sequences,
-                        prompt_lens,
-                        attention_masks,
-                        rewards,
-                        args.alpha,
-                        args.beta,
-                        args.completions_per_prefix,
-                        args.score_micro_batch_size,
-                        micro_sequences / total_sequences,
-                        active_callback=active_loss_callback,
-                        ref_model=ref_model,
-                    )
-                    debug_log(f"[block {block_idx}] step {step_id} score chunk loss/backward end", rank=rank)
-                else:
-                    debug_log(f"[block {block_idx}] step {step_id} loss forward begin", rank=rank)
-                    loss, logp_theta, logp_ref = vargrad_tb_loss(
-                        model,
-                        tokenizer,
-                        sequences,
-                        prompt_lens,
-                        attention_masks,
-                        rewards,
-                        args.alpha,
-                        args.beta,
-                        args.completions_per_prefix,
-                        args.score_micro_batch_size,
-                        ref_model=ref_model,
-                    )
-                    debug_log(f"[block {block_idx}] step {step_id} loss forward end", rank=rank)
-                    debug_log(f"[block {block_idx}] step {step_id} backward begin", rank=rank)
-                    (loss * (micro_sequences / total_sequences)).backward()
-                    sync_cuda_if_available()
-                    debug_log(f"[block {block_idx}] step {step_id} backward end", rank=rank)
-
-                loss_sum += float(loss.detach().cpu()) * micro_sequences
-                reward_sum += float(rewards.sum().detach().cpu())
-                logp_theta_sum += float(logp_theta.sum().cpu())
-                logp_ref_sum += float(logp_ref.sum().cpu())
-
-                if rank == 0 and args.save_samples:
-                    for row_idx, row in micro_df.iterrows():
-                        completion_len = int(
-                            completion_end(
-                                sequences[row_idx],
-                                prompt_lens[row_idx],
-                                tokenizer.eos_token_id,
-                            )
-                            - prompt_lens[row_idx]
-                        )
-                        sample_records.append(
-                            {
-                                "step": step_id,
-                                "epoch": epoch,
-                                "block_idx": block_idx,
-                                "rank": rank,
-                                "example_idx": int(row["example_idx"]),
-                                "sample_idx": int(row["sample_idx"]),
-                                "question": row["question"],
-                                "correct_answer": row["correct_answer"],
-                                "prefix_token_len": int(row["prefix_token_len"]),
-                                "prefix_text": row["prefix_text"],
-                                "completion_token_len": completion_len,
-                                "completion": row["completion"],
-                                "parsed_answer": row["parsed_answer"],
-                                "has_boxed_answer": bool(row["has_boxed_answer"]),
-                                "reward": float(row["reward"]),
-                                "logp_theta": float(logp_theta[row_idx].cpu()),
-                                "logp_ref": float(logp_ref[row_idx].cpu()),
-                            }
-                        )
-
-            debug_log(f"[block {block_idx}] step {step_id} optimizer step begin", rank=rank)
-            optimizer.step()
-            debug_log(f"[block {block_idx}] step {step_id} optimizer step end", rank=rank)
-            global_step = step_id
-            reduced_loss_sum, reduced_reward_sum, reduced_logp_theta_sum, reduced_logp_ref_sum, reduced_total_sequences = reduce_metric_values(
-                [loss_sum, reward_sum, logp_theta_sum, logp_ref_sum, total_sequences],
-                next(unwrap_model(model).parameters()).device,
-                world_size > 1,
-            )
-            if rank == 0:
-                record = {
-                    "step": global_step,
-                    "epoch": epoch,
-                    "block_idx": block_idx,
-                    "rank": rank,
-                    "world_size": world_size,
-                    "loss": reduced_loss_sum / reduced_total_sequences,
-                    "reward_mean": reduced_reward_sum / reduced_total_sequences,
-                    "logp_theta_mean": reduced_logp_theta_sum / reduced_total_sequences,
-                    "logp_ref_mean": reduced_logp_ref_sum / reduced_total_sequences,
-                }
-                metrics.append(record)
-                print(record, flush=True)
-                if wandb_run is not None and should_log_wandb_step(args, global_step):
-                    debug_log(f"[block {block_idx}] wandb step log begin step={global_step}", rank=rank)
-                    wandb_run.log(record, step=global_step)
-                    debug_log(f"[block {block_idx}] wandb step log end step={global_step}", rank=rank)
-            if rank == 0 and checkpoint_callback is not None and args.save_every_steps and global_step % args.save_every_steps == 0:
-                checkpoint_callback(
-                    current_block_idx=block_idx,
-                    global_step=global_step,
-                    resume_epoch=epoch,
-                    resume_batch_start=start + args.batch_size,
-                    resume_rank_order=rank_order,
-                )
-            if args.max_train_steps and global_step >= args.max_train_steps:
-                debug_log(
-                    f"[block {block_idx}] reached max_train_steps={args.max_train_steps}; stopping training loop",
-                    rank=rank,
-                )
-                return global_step
-    return global_step
+def read_checkpoint_state(checkpoint_dir):
+    state_path = Path(checkpoint_dir) / "training_state.pt"
+    if not state_path.exists():
+        return {}
+    checkpoint = torch.load(state_path, map_location="cpu", weights_only=False)
+    return checkpoint.get("state", {})
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Eval-only helper plus shared buffer generation utilities.")
     parser.add_argument("--data_path", type=str, default="data/MATH500.json")
     parser.add_argument("--eval_data_path", type=str, default="data/MATH500.json")
     parser.add_argument("--output_dir", type=str, default="results/blockwise_tb_buffer")
     parser.add_argument("--model", type=str, default="qwen")
     parser.add_argument("--prompt_model", type=str, default=None, choices=sorted(MODEL_NAME_BY_KEY))
-    parser.add_argument("--max_examples", type=int, default=32)
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--micro_batch_size", type=int, default=1)
-    parser.add_argument("--score_micro_batch_size", type=int, default=None)
-    parser.add_argument("--score_chunk_backward", action="store_true")
-    parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--block_size", type=int, default=192)
-    parser.add_argument("--block_train_mode", type=str, default="cumulative", choices=["cumulative", "incremental"])
-    parser.add_argument("--num_blocks", type=int, default=3)
-    parser.add_argument("--completions_per_prefix", type=int, default=4)
-    parser.add_argument("--future_completions_per_partial", type=int, default=None)
-    parser.add_argument("--max_new_tokens", type=int, default=3072)
-    parser.add_argument("--max_completion_tokens", type=int, default=3072)
-    parser.add_argument("--temperature", type=float, default=0.25)
-    parser.add_argument("--alpha", type=float, default=4.0)
-    parser.add_argument("--beta", type=float, default=1.0)
-    parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--torch_dtype", type=str, default="bfloat16", choices=["auto", "bfloat16", "float16", "float32"])
     parser.add_argument("--attn_implementation", type=str, default=None, choices=["eager", "sdpa", "flash_attention_2"])
-    parser.add_argument("--gradient_checkpointing", action="store_true")
-    parser.add_argument("--save_every_block", action="store_true")
-    parser.add_argument("--save_every_steps", type=int, default=0)
-    parser.add_argument("--save_samples", action="store_true")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None)
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="one-step-post-correction")
@@ -866,7 +368,6 @@ def main():
     parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument("--wandb_id", type=str, default=None)
     parser.add_argument("--wandb_resume", type=str, default="allow")
-    parser.add_argument("--wandb_log_every", type=int, default=0)
     parser.add_argument("--eval_every_block", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--eval_backend", type=str, default="hf", choices=["hf", "vllm"])
@@ -879,303 +380,82 @@ def main():
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.9)
     parser.add_argument("--vllm_max_model_len", type=int, default=4096)
     parser.add_argument("--vllm_batch_size", type=int, default=8)
-    parser.add_argument("--vllm_visible_devices", type=str, default=None)
     parser.add_argument("--vllm_enforce_eager", action="store_true")
     parser.add_argument("--vllm_disable_custom_all_reduce", action="store_true")
-    parser.add_argument("--skip_buffer_sampling", action="store_true")
     parser.add_argument("--debug_dump_timeout_seconds", type=int, default=600)
-    parser.add_argument("--max_train_steps", type=int, default=0)
-    parser.add_argument("--disable_tqdm", action="store_true")
-    parser.add_argument("--disable_micro_batch_debug_dump", action="store_true")
     parser.add_argument("--quiet_debug_logs", action="store_true")
     args = parser.parse_args()
 
     if not args.eval_only:
         raise ValueError(
-            "The legacy non-Accelerate training entrypoint has been retired. "
-            "Use run_blockwise_buffer_pipeline.py, which now trains exclusively via blockwise_accelerate_train.py."
+            "This module no longer contains a training entrypoint. "
+            "Use run_blockwise_buffer_pipeline.py for sample -> score -> Accelerate/DDP train."
         )
+    if not args.resume_from_checkpoint:
+        raise ValueError("--eval_only requires --resume_from_checkpoint")
 
     global QUIET_DEBUG_LOGS
     QUIET_DEBUG_LOGS = bool(args.quiet_debug_logs)
 
     output_dir = Path(args.output_dir)
-    debug_path = setup_debug_file(output_dir, f"trainer_preinit_pid{os.getpid()}.log", args.debug_dump_timeout_seconds)
-    debug_log(f"trainer process start argv={' '.join(sys.argv)}")
-    debug_log(f"pre-init env CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} LOCAL_RANK={os.environ.get('LOCAL_RANK')} RANK={os.environ.get('RANK')} WORLD_SIZE={os.environ.get('WORLD_SIZE')}")
-
+    setup_debug_file(output_dir, f"eval_pid{os.getpid()}.log", args.debug_dump_timeout_seconds)
     try:
-        rank, local_rank, world_size, distributed_device, distributed = init_distributed_from_env()
-        if distributed and args.save_every_steps:
-            raise ValueError("--save_every_steps mid-block checkpointing is not supported with DDP training yet.")
-        close_debug_file()
-        debug_path = setup_debug_file(output_dir, f"trainer_rank{rank}.log", args.debug_dump_timeout_seconds)
-        debug_log(
-            f"{'distributed' if distributed else 'single-process'} init complete local_rank={local_rank} world_size={world_size}",
-            rank=rank,
-        )
-        debug_log(
-            f"post-init env CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} LOCAL_RANK={local_rank} RANK={rank} WORLD_SIZE={world_size}",
-            rank=rank,
-        )
-        seed_everything(args.seed + rank)
-
+        seed_everything(args.seed)
+        device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
         output_dir.mkdir(parents=True, exist_ok=True)
-        debug_log("output dir ready", rank=rank)
 
-        debug_log("loading datasets", rank=rank)
-        dataset = load_math_dataset(args.data_path)[: args.max_examples]
-        eval_rows = load_math_dataset(args.eval_data_path)[: args.eval_examples] if args.eval_every_block else []
-        debug_log(f"loaded datasets train={len(dataset)} eval={len(eval_rows)}", rank=rank)
         model_name = resolve_model_name(args.model)
         prompt_model = resolve_prompt_model_key(args.model, args.prompt_model)
-        debug_log(f"resolved model_name={model_name} prompt_model={prompt_model}", rank=rank)
-        debug_log(f"loading tokenizer for {model_name}", rank=rank)
+        debug_log(f"eval-only start model_name={model_name} prompt_model={prompt_model}")
         tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
-        debug_log("tokenizer ready", rank=rank)
 
-        resume_state = None
-        start_block_idx = 1
-        global_step = 0
-        adapter_path = None
-        resume_block_state = None
-        if args.resume_from_checkpoint:
-            debug_log(f"reading resume state from {args.resume_from_checkpoint}", rank=rank)
-            checkpoint_dir = Path(args.resume_from_checkpoint)
-            adapter_path = checkpoint_dir / "adapter"
-            resume_state = torch.load(checkpoint_dir / "training_state.pt", map_location="cpu", weights_only=False)["state"]
-            resume_block_idx = resume_state.get("current_block_idx")
-            resume_batch_start = int(resume_state.get("resume_batch_start", 0) or 0)
-            if resume_block_idx is not None and resume_batch_start > 0:
-                start_block_idx = int(resume_block_idx)
-                resume_block_state = resume_state
-            else:
-                start_block_idx = int(resume_state.get("next_block_idx", 1))
-            global_step = int(resume_state.get("global_step", 0))
-            debug_log(
-                f"resume state ready next_block_idx={start_block_idx} global_step={global_step}",
-                rank=rank,
+        eval_rows = load_math_dataset(args.eval_data_path)[: args.eval_examples]
+        checkpoint_dir = Path(args.resume_from_checkpoint)
+        adapter_path = checkpoint_dir / "adapter"
+        resume_state = read_checkpoint_state(checkpoint_dir)
+        global_step = int(resume_state.get("global_step", 0) or 0)
+        block_idx = int(resume_state.get("next_block_idx", 1) or 1) - 1
+
+        wandb_run = maybe_init_wandb(args, 0, resume_state)
+        if args.eval_backend == "vllm":
+            eval_metrics = evaluate_model_with_vllm(
+                model_name,
+                tokenizer,
+                eval_rows,
+                args,
+                adapter_path=adapter_path,
             )
-
-        debug_log("initializing wandb state", rank=rank)
-        wandb_run = maybe_init_wandb(args, rank, resume_state)
-        if rank == 0 and wandb_run is not None and args.wandb_id is None:
-            args.wandb_id = wandb_run.id
-        if args.eval_only:
-            debug_log("startup complete; entering eval-only path", rank=rank)
         else:
-            debug_log("startup complete; entering block loop", rank=rank)
-
-        metrics = []
-        sample_records = []
-        eval_records = []
-
-        if args.eval_only:
-            if not args.resume_from_checkpoint:
-                raise ValueError("--eval_only requires --resume_from_checkpoint")
-            debug_log("[eval-only] loading model from checkpoint adapter", rank=rank)
-            if distributed and rank != 0:
-                if dist.is_initialized():
-                    dist.barrier()
-                return
-            if args.eval_backend == "vllm":
-                eval_metrics = evaluate_model_with_vllm(
-                    model_name,
-                    tokenizer,
-                    eval_rows,
-                    args,
-                    adapter_path=adapter_path,
-                )
-            else:
-                model = load_lora_model(
-                    model_name,
-                    args.torch_dtype,
-                    distributed_device,
-                    adapter_path,
-                    attn_implementation=args.attn_implementation,
-                )
-                eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
-                del model
-                clear_cuda()
-            eval_metrics = {
-                **eval_metrics,
-                "block_idx": start_block_idx - 1,
-                "step": global_step,
-            }
-            eval_records.append(eval_metrics)
-            print(eval_metrics, flush=True)
-            pd.DataFrame(eval_records).to_csv(output_dir / "eval_metrics.csv", index=False)
-            if wandb_run is not None:
-                debug_log("[eval-only] wandb eval log begin", rank=rank)
-                wandb_run.log(eval_metrics, step=global_step)
-                debug_log("[eval-only] wandb eval log end", rank=rank)
-            log_point("[eval-only] eval outputs written", rank=rank)
-            if wandb_run is not None:
-                wandb_run.finish()
-            if distributed and dist.is_initialized():
-                dist.barrier()
-            return
-
-        for block_idx in range(start_block_idx, args.num_blocks + 1):
-            stage_adapter_path = adapter_path
-            if not args.skip_buffer_sampling:
-                if rank == 0:
-                    generate_stage_buffer_subprocess(block_idx, args, stage_adapter_path)
-                if distributed:
-                    dist.barrier()
-            log_point(f"[block {block_idx}] sampler finished; entering training setup", rank=rank)
-
-            buffer_path = output_dir / "buffers" / f"block_{block_idx}.csv"
-            if not buffer_path.exists():
-                raise FileNotFoundError(f"Missing sampled buffer for block {block_idx}: {buffer_path}")
-            debug_log(f"[block {block_idx}] loading buffer from {buffer_path}", rank=rank)
-            buffer_df = pd.read_csv(buffer_path)
-            debug_log(f"[block {block_idx}] loaded {len(buffer_df)} buffered samples", rank=rank)
-            scored_buffer = has_precomputed_scores(buffer_df)
-
-            debug_log(f"[block {block_idx}] loading train model", rank=rank)
             model = load_lora_model(
                 model_name,
                 args.torch_dtype,
-                distributed_device,
-                stage_adapter_path,
+                device,
+                adapter_path,
                 attn_implementation=args.attn_implementation,
             )
-            ref_model = None
-            if not scored_buffer:
-                debug_log(f"[block {block_idx}] loading reference model", rank=rank)
-                ref_model = load_reference_model(
-                    model_name,
-                    args.torch_dtype,
-                    distributed_device,
-                    attn_implementation=args.attn_implementation,
-                )
-            model.train()
-            if distributed:
-                debug_log(f"[block {block_idx}] wrapping model with DDP begin", rank=rank)
-                model = wrap_model_for_ddp(model, local_rank)
-                debug_log(f"[block {block_idx}] wrapping model with DDP end", rank=rank)
-            if args.gradient_checkpointing:
-                debug_log(f"[block {block_idx}] enabling gradient checkpointing", rank=rank)
-                enable_gradient_checkpointing(model)
-            optimizer = torch.optim.AdamW(
-                [param for param in model.parameters() if param.requires_grad],
-                lr=args.lr,
-            )
-            if args.resume_from_checkpoint and block_idx == start_block_idx:
-                debug_log(
-                    f"[block {block_idx}] restoring optimizer and RNG from {args.resume_from_checkpoint}",
-                    rank=rank,
-                )
-                load_checkpoint_state(args.resume_from_checkpoint, optimizer, distributed_device)
-
-            debug_log(f"[block {block_idx}] starting training loop", rank=rank)
-
-            def save_mid_block_checkpoint(current_block_idx, global_step, resume_epoch, resume_batch_start, resume_rank_order):
-                checkpoint_state = build_checkpoint_state(
-                    args,
-                    wandb_run,
-                    global_step=global_step,
-                    next_block_idx=current_block_idx,
-                    current_block_idx=current_block_idx,
-                    resume_epoch=resume_epoch,
-                    resume_batch_start=resume_batch_start,
-                    resume_rank_order=resume_rank_order,
-                )
-                save_checkpoint(output_dir, model, tokenizer, optimizer, checkpoint_state, distributed=False)
-                log_point(
-                    f"[block {current_block_idx}] checkpoint_latest updated at step {global_step}",
-                    rank=rank,
-                )
-
-            global_step = train_stage_from_buffer(
-                model,
-                ref_model,
-                tokenizer,
-                optimizer,
-                buffer_df,
-                dataset,
-                block_idx,
-                args,
-                rank,
-                world_size,
-                global_step,
-                metrics,
-                sample_records,
-                wandb_run,
-                resume_block_state=resume_block_state if block_idx == start_block_idx else None,
-                checkpoint_callback=save_mid_block_checkpoint,
-            )
-            resume_block_state = None
-
-            if args.save_every_block:
-                block_dir = output_dir / f"block_{block_idx}"
-                if rank == 0:
-                    unwrap_model(model).save_pretrained(block_dir)
-                    tokenizer.save_pretrained(block_dir)
-                    log_point(f"[block {block_idx}] saved block checkpoint", rank=rank)
-                if distributed:
-                    dist.barrier()
-
-            if rank == 0 and args.eval_every_block:
-                debug_log(f"[block {block_idx}] starting eval on {len(eval_rows)} examples", rank=rank)
-                if args.eval_backend == "vllm":
-                    eval_metrics = evaluate_model_with_vllm(
-                        model_name,
-                        tokenizer,
-                        eval_rows,
-                        args,
-                        adapter_path=stage_adapter_path,
-                    )
-                else:
-                    eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
-                eval_metrics = {**eval_metrics, "block_idx": block_idx, "step": global_step}
-                eval_records.append(eval_metrics)
-                print(eval_metrics, flush=True)
-                if wandb_run is not None:
-                    debug_log(f"[block {block_idx}] wandb eval log begin", rank=rank)
-                    wandb_run.log(eval_metrics, step=global_step)
-                    debug_log(f"[block {block_idx}] wandb eval log end", rank=rank)
-            if distributed:
-                dist.barrier()
-
-            checkpoint_state = build_checkpoint_state(
-                args,
-                wandb_run,
-                global_step=global_step,
-                next_block_idx=block_idx + 1,
-            )
-            save_checkpoint(output_dir, model, tokenizer, optimizer, checkpoint_state, distributed=distributed)
-            adapter_path = output_dir / "checkpoint_latest" / "adapter"
-            if rank == 0:
-                log_point(f"[block {block_idx}] checkpoint_latest updated", rank=rank)
-
+            eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
             del model
-            if ref_model is not None:
-                del ref_model
-            del optimizer
             clear_cuda()
 
-        if rank == 0:
-            pd.DataFrame(metrics).to_csv(output_dir / "metrics.csv", index=False)
-            if args.save_samples:
-                pd.DataFrame(sample_records).to_csv(output_dir / "samples.csv", index=False)
-            if eval_records:
-                pd.DataFrame(eval_records).to_csv(output_dir / "eval_metrics.csv", index=False)
-
-            log_point("[final] outputs written", rank=rank)
-
+        eval_metrics = {
+            **eval_metrics,
+            "block_idx": block_idx,
+            "step": global_step,
+        }
+        print(eval_metrics, flush=True)
+        pd.DataFrame([eval_metrics]).to_csv(output_dir / "eval_metrics.csv", index=False)
         if wandb_run is not None:
+            wandb_run.log(eval_metrics, step=global_step)
             wandb_run.finish()
+        log_point("[eval-only] eval outputs written")
     except Exception:
         debug_log("unhandled exception follows", always=True)
         debug_log(traceback.format_exc().rstrip(), always=True)
         raise
     finally:
         close_debug_file()
-        cleanup_distributed("distributed" in locals() and distributed)
 
 
 if __name__ == "__main__":

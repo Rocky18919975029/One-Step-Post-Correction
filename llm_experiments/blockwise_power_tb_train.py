@@ -1,19 +1,16 @@
 import json
 import os
 import random
-import shutil
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
-from torch.nn.parallel import DistributedDataParallel as DDP
 import transformers
 from tqdm import tqdm
 
-from constants import *
+from constants import *  # noqa: F401,F403
 from grader_utils.math_grader import grade_answer
 from grader_utils.parse_utils import parse_answer
 from power_samp_utils import format_prompt
@@ -49,7 +46,7 @@ def seed_everything(seed):
 
 
 def unwrap_model(model):
-    return model.module if isinstance(model, DDP) else model
+    return getattr(model, "module", model)
 
 
 def load_math_dataset(path):
@@ -93,10 +90,7 @@ def load_lora_model(model_name, torch_dtype, device=None, adapter_path=None, att
         ) from exc
 
     if device is None:
-        if torch.cuda.is_available():
-            device = torch.device("cuda:0")
-        else:
-            device = torch.device("cpu")
+        device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
     model_kwargs = {
         "torch_dtype": parse_torch_dtype(torch_dtype),
@@ -162,10 +156,7 @@ def load_lora_model(model_name, torch_dtype, device=None, adapter_path=None, att
 
 def load_reference_model(model_name, torch_dtype, device=None, attn_implementation=None):
     if device is None:
-        if torch.cuda.is_available():
-            device = torch.device("cuda:0")
-        else:
-            device = torch.device("cpu")
+        device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
     model_kwargs = {
         "torch_dtype": parse_torch_dtype(torch_dtype),
@@ -237,37 +228,6 @@ def completion_logprob(model, sequences, prompt_lens, attention_masks, eos_token
     return torch.stack(losses)
 
 
-def completion_logprob_chunks(model, sequences, prompt_lens, attention_masks, eos_token_id, chunk_size):
-    chunks = []
-    for start in range(0, sequences.shape[0], chunk_size):
-        end = min(start + chunk_size, sequences.shape[0])
-        chunks.append(
-            completion_logprob(
-                model,
-                sequences[start:end],
-                prompt_lens[start:end],
-                attention_masks[start:end],
-                eos_token_id,
-            )
-        )
-    return torch.cat(chunks, dim=0)
-
-
-def capture_rng_state(device):
-    state = {"cpu": torch.get_rng_state()}
-    device = torch.device(device)
-    if torch.cuda.is_available() and device.type == "cuda":
-        state["cuda"] = torch.cuda.get_rng_state(device)
-    return state
-
-
-def restore_rng_state(state, device):
-    torch.set_rng_state(state["cpu"])
-    device = torch.device(device)
-    if "cuda" in state and torch.cuda.is_available() and device.type == "cuda":
-        torch.cuda.set_rng_state(state["cuda"], device)
-
-
 def sync_cuda_if_available():
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -282,286 +242,6 @@ def score_completion(completion, answer):
     return reward, parsed
 
 
-def vargrad_tb_loss(
-    model,
-    tokenizer,
-    sequences,
-    prompt_lens,
-    attention_masks,
-    rewards,
-    alpha,
-    beta,
-    num_return_sequences,
-    score_micro_batch_size=None,
-    ref_model=None,
-):
-    raw_model = unwrap_model(model)
-    if ref_model is None and not hasattr(raw_model, "disable_adapter"):
-        raise RuntimeError("Reference logprob requires a PEFT LoRA model with disable_adapter().")
-
-    if score_micro_batch_size is None or score_micro_batch_size >= sequences.shape[0]:
-        logp_theta = completion_logprob(model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
-        with torch.no_grad():
-            if ref_model is not None:
-                logp_ref = completion_logprob(ref_model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
-            else:
-                with raw_model.disable_adapter():
-                    logp_ref = completion_logprob(raw_model, sequences, prompt_lens, attention_masks, tokenizer.eos_token_id)
-
-        log_reward_augmented_target = alpha * logp_ref + rewards / beta
-        log_z_terms = alpha * logp_ref - logp_theta.detach() + rewards / beta
-        log_z_hat = log_z_terms.view(-1, num_return_sequences).mean(dim=1)
-        expanded_log_z_hat = log_z_hat.repeat_interleave(num_return_sequences)
-
-        loss = (
-            expanded_log_z_hat.detach()
-            + logp_theta
-            - log_reward_augmented_target.detach()
-        ).pow(2).mean()
-        return loss, logp_theta.detach(), logp_ref.detach()
-
-    score_micro_batch_size = max(1, int(score_micro_batch_size))
-    with torch.no_grad():
-        if ref_model is not None:
-            logp_ref = completion_logprob_chunks(
-                ref_model,
-                sequences,
-                prompt_lens,
-                attention_masks,
-                tokenizer.eos_token_id,
-                score_micro_batch_size,
-            ).detach()
-        else:
-            with raw_model.disable_adapter():
-                logp_ref = completion_logprob_chunks(
-                    raw_model,
-                    sequences,
-                    prompt_lens,
-                    attention_masks,
-                    tokenizer.eos_token_id,
-                    score_micro_batch_size,
-                ).detach()
-
-    logp_theta_chunks = []
-    for start in range(0, sequences.shape[0], score_micro_batch_size):
-        end = min(start + score_micro_batch_size, sequences.shape[0])
-        logp_theta = completion_logprob(
-            model,
-            sequences[start:end],
-            prompt_lens[start:end],
-            attention_masks[start:end],
-            tokenizer.eos_token_id,
-        )
-        logp_theta_chunks.append(logp_theta)
-
-    logp_theta_all = torch.cat(logp_theta_chunks, dim=0)
-    log_z_terms = alpha * logp_ref - logp_theta_all.detach() + rewards / beta
-    log_z_hat = log_z_terms.view(-1, num_return_sequences).mean(dim=1)
-    expanded_log_z_hat = log_z_hat.repeat_interleave(num_return_sequences)
-
-    target = (alpha * logp_ref + rewards / beta).detach()
-    residual = expanded_log_z_hat.detach() + logp_theta_all - target
-    loss = residual.pow(2).mean()
-    return loss, logp_theta_all.detach(), logp_ref.detach()
-
-
-def vargrad_tb_loss_with_score_chunk_backward(
-    model,
-    tokenizer,
-    sequences,
-    prompt_lens,
-    attention_masks,
-    rewards,
-    alpha,
-    beta,
-    num_return_sequences,
-    score_micro_batch_size,
-    loss_scale,
-    active_callback=None,
-    ref_model=None,
-):
-    raw_model = unwrap_model(model)
-    if ref_model is None and not hasattr(raw_model, "disable_adapter"):
-        raise RuntimeError("Reference logprob requires a PEFT LoRA model with disable_adapter().")
-
-    row_count = int(sequences.shape[0])
-    score_micro_batch_size = max(1, int(score_micro_batch_size or row_count))
-    chunk_ranges = [
-        (start, min(start + score_micro_batch_size, row_count))
-        for start in range(0, row_count, score_micro_batch_size)
-    ]
-
-    if active_callback is not None:
-        active_callback("ref_forward", 0, row_count)
-    with torch.no_grad():
-        if ref_model is not None:
-            logp_ref = completion_logprob_chunks(
-                ref_model,
-                sequences,
-                prompt_lens,
-                attention_masks,
-                tokenizer.eos_token_id,
-                score_micro_batch_size,
-            ).detach()
-        else:
-            with raw_model.disable_adapter():
-                logp_ref = completion_logprob_chunks(
-                    raw_model,
-                    sequences,
-                    prompt_lens,
-                    attention_masks,
-                    tokenizer.eos_token_id,
-                    score_micro_batch_size,
-                ).detach()
-    sync_cuda_if_available()
-    if active_callback is not None:
-        active_callback("ref_forward_end", 0, row_count)
-
-    theta_for_z_chunks = []
-    chunk_rng_states = []
-    for start, end in chunk_ranges:
-        if active_callback is not None:
-            active_callback("theta_for_z_forward", start, end)
-        chunk_rng_states.append(capture_rng_state(sequences.device))
-        with torch.no_grad():
-            theta_for_z_chunks.append(
-                completion_logprob(
-                    raw_model,
-                    sequences[start:end],
-                    prompt_lens[start:end],
-                    attention_masks[start:end],
-                    tokenizer.eos_token_id,
-                ).detach()
-            )
-        sync_cuda_if_available()
-        if active_callback is not None:
-            active_callback("theta_for_z_forward_end", start, end)
-
-    logp_theta_for_z = torch.cat(theta_for_z_chunks, dim=0)
-    log_z_terms = alpha * logp_ref - logp_theta_for_z + rewards / beta
-    log_z_hat = log_z_terms.view(-1, num_return_sequences).mean(dim=1)
-    expanded_log_z_hat = log_z_hat.repeat_interleave(num_return_sequences).detach()
-    target = (alpha * logp_ref + rewards / beta).detach()
-    detached_residual = expanded_log_z_hat + logp_theta_for_z - target
-    detached_loss = detached_residual.pow(2).mean()
-
-    for (start, end), rng_state in zip(chunk_ranges, chunk_rng_states):
-        if active_callback is not None:
-            active_callback("theta_grad_forward", start, end)
-        restore_rng_state(rng_state, sequences.device)
-        logp_theta = completion_logprob(
-            model,
-            sequences[start:end],
-            prompt_lens[start:end],
-            attention_masks[start:end],
-            tokenizer.eos_token_id,
-        )
-        sync_cuda_if_available()
-        if active_callback is not None:
-            active_callback("theta_grad_forward_end", start, end)
-        residual = expanded_log_z_hat[start:end] + logp_theta - target[start:end]
-        chunk_loss = residual.pow(2).sum() / row_count
-        if active_callback is not None:
-            active_callback("theta_backward", start, end)
-        (chunk_loss * loss_scale).backward()
-        sync_cuda_if_available()
-        if active_callback is not None:
-            active_callback("theta_backward_end", start, end)
-
-    if active_callback is not None:
-        active_callback("complete", 0, row_count)
-    return detached_loss.detach(), logp_theta_for_z.detach(), logp_ref.detach()
-
-
-def save_checkpoint(output_dir, model, tokenizer, optimizer, state, distributed):
-    if distributed:
-        dist.barrier()
-
-    checkpoint_dir = Path(output_dir) / "checkpoint_latest"
-    tmp_dir = Path(output_dir) / "checkpoint_latest_tmp"
-    is_rank0 = not distributed or dist.get_rank() == 0
-    if not is_rank0:
-        if distributed:
-            dist.barrier()
-        return
-
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-
-    unwrap_model(model).save_pretrained(tmp_dir / "adapter")
-    tokenizer.save_pretrained(tmp_dir / "adapter")
-    torch.save(
-        {
-            "optimizer": optimizer.state_dict(),
-            "state": state,
-            "torch_rng_state": torch.get_rng_state(),
-            "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-            "numpy_rng_state": np.random.get_state(),
-            "python_rng_state": random.getstate(),
-        },
-        tmp_dir / "training_state.pt",
-    )
-
-    if checkpoint_dir.exists():
-        shutil.rmtree(checkpoint_dir)
-    tmp_dir.rename(checkpoint_dir)
-    if distributed:
-        dist.barrier()
-
-
-def move_optimizer_state_to_device(optimizer, device):
-    if device is None:
-        return
-    for state in optimizer.state.values():
-        for key, value in state.items():
-            if torch.is_tensor(value):
-                state[key] = value.to(device)
-
-
-def load_checkpoint_state(checkpoint_dir, optimizer=None, optimizer_device=None):
-    checkpoint_dir = Path(checkpoint_dir)
-    training_state = torch.load(
-        checkpoint_dir / "training_state.pt",
-        map_location="cpu",
-        weights_only=False,
-    )
-    if optimizer is not None:
-        optimizer.load_state_dict(training_state["optimizer"])
-        move_optimizer_state_to_device(optimizer, optimizer_device)
-
-    torch_rng_state = training_state["torch_rng_state"]
-    if torch_rng_state.device.type != "cpu":
-        torch_rng_state = torch_rng_state.cpu()
-    torch.set_rng_state(torch_rng_state)
-    if torch.cuda.is_available() and training_state["cuda_rng_state_all"] is not None:
-        cuda_rng_state_all = [
-            state.cpu() if torch.is_tensor(state) and state.device.type != "cpu" else state
-            for state in training_state["cuda_rng_state_all"]
-        ]
-        visible_device_count = torch.cuda.device_count()
-        saved_device_count = len(cuda_rng_state_all)
-        if visible_device_count == saved_device_count:
-            torch.cuda.set_rng_state_all(cuda_rng_state_all)
-        else:
-            restore_count = min(visible_device_count, saved_device_count)
-            if restore_count == 0:
-                print(
-                    "Warning: checkpoint contains CUDA RNG state, but no visible CUDA devices are available for restore.",
-                    flush=True,
-                )
-            else:
-                print(
-                    "Warning: checkpoint CUDA RNG state count "
-                    f"({saved_device_count}) does not match visible CUDA device count "
-                    f"({visible_device_count}); restoring the first {restore_count} state(s).",
-                    flush=True,
-                )
-                for device_idx in range(restore_count):
-                    torch.cuda.set_rng_state(cuda_rng_state_all[device_idx], device_idx)
-    np.random.set_state(training_state["numpy_rng_state"])
-    random.setstate(training_state["python_rng_state"])
-    return training_state["state"]
 def maybe_init_wandb(args, rank, resume_state):
     if not args.use_wandb or rank != 0:
         return None
@@ -625,21 +305,15 @@ def evaluate_model(model, tokenizer, eval_rows, args):
             reward, parsed = score_completion(completion, row["answer"])
             rewards.append(reward)
             boxed.append(parsed is not None)
-
-            del output
-            del input_ids
-            del attention_mask
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
     finally:
-        if original_use_cache is not None and hasattr(raw_model, "config"):
+        if hasattr(raw_model, "config"):
             raw_model.config.use_cache = original_use_cache
         if had_gradient_checkpointing and hasattr(raw_model, "gradient_checkpointing_enable"):
             try:
                 raw_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
             except TypeError:
                 raw_model.gradient_checkpointing_enable()
-        raw_model.train()
+
     return {
         "eval/accuracy": float(np.mean(rewards)),
         "eval/boxed_rate": float(np.mean(boxed)),
