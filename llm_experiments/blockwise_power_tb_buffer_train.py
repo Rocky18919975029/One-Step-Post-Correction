@@ -245,6 +245,27 @@ def partial_completion_token_limit(block_idx, args):
     return min(block_idx * args.block_size, args.max_completion_tokens)
 
 
+def stage_completion_slices(tokenizer, prompt_text, partial_completion, block_idx, args):
+    stage_end = partial_completion_token_limit(block_idx, args)
+    stage_start = min(max((block_idx - 1) * args.block_size, 0), stage_end)
+    partial_ids = tokenizer.encode(partial_completion, add_special_tokens=False)
+    prefix_piece_ids = partial_ids[:stage_start]
+    completion_ids = partial_ids[stage_start:stage_end]
+    prefix_piece = tokenizer.decode(prefix_piece_ids, skip_special_tokens=False) if prefix_piece_ids else ""
+    completion = tokenizer.decode(completion_ids, skip_special_tokens=False) if completion_ids else ""
+    prefix_text = prompt_text + prefix_piece
+    return {
+        "prefix_text": prefix_text,
+        "prefix_token_len": len(tokenizer.encode(prefix_text)),
+        "completion": completion,
+        "completion_token_len": len(completion_ids),
+        "stage_start_token": stage_start,
+        "stage_end_token": stage_start + len(completion_ids),
+        "full_partial_completion": partial_completion,
+        "full_partial_completion_token_len": len(partial_ids),
+    }
+
+
 def evaluate_model_with_vllm(model_name, tokenizer, eval_rows, args, adapter_path=None):
     if not eval_rows:
         return {}
@@ -322,7 +343,13 @@ def generate_stage_buffer(
             example_idx = example_idx_offset + local_example_idx
             for sample_idx, partial_completion in enumerate(partials):
                 partial_prefix = prompt_text + partial_completion
-                partial_token_len = len(tokenizer.encode(partial_completion, add_special_tokens=False))
+                stage_slice = stage_completion_slices(
+                    tokenizer,
+                    prompt_text,
+                    partial_completion,
+                    block_idx,
+                    args,
+                )
                 future_prompts.append(partial_prefix)
                 future_metadata.append(
                     {
@@ -330,10 +357,8 @@ def generate_stage_buffer(
                         "sample_idx": sample_idx,
                         "question": row["prompt"],
                         "correct_answer": row["answer"],
-                        "prefix_text": prompt_text,
-                        "prefix_token_len": len(tokenizer.encode(prompt_text)),
-                        "completion": partial_completion,
-                        "completion_token_len": partial_token_len,
+                        "full_completion_for_reward": partial_completion,
+                        **stage_slice,
                     }
                 )
 
@@ -359,7 +384,7 @@ def generate_stage_buffer(
         future_rewards = []
         first_successful_parsed = None
         for future in futures:
-            full_completion = meta["completion"] + future
+            full_completion = meta["full_completion_for_reward"] + future
             future_reward, future_parsed = score_completion(full_completion, meta["correct_answer"])
             future_rewards.append(future_reward)
             if future_reward > 0 and first_successful_parsed is None:
@@ -377,6 +402,10 @@ def generate_stage_buffer(
                 "prefix_text": meta["prefix_text"],
                 "completion_token_len": meta["completion_token_len"],
                 "completion": meta["completion"],
+                "stage_start_token": meta["stage_start_token"],
+                "stage_end_token": meta["stage_end_token"],
+                "full_partial_completion_token_len": meta["full_partial_completion_token_len"],
+                "full_partial_completion": meta["full_partial_completion"],
                 "parsed_answer": first_successful_parsed,
                 "has_boxed_answer": first_successful_parsed is not None,
                 "reward": reward,

@@ -81,6 +81,12 @@ def is_complete_buffer(output_dir, block_idx, args):
         "completion",
         "reward",
     }
+    stage_columns = {
+        "stage_start_token",
+        "stage_end_token",
+        "full_partial_completion_token_len",
+        "full_partial_completion",
+    }
     expected_rows = args.max_examples * args.completions_per_prefix
     per_example_counts = {}
 
@@ -89,6 +95,8 @@ def is_complete_buffer(output_dir, block_idx, args):
             reader = csv.DictReader(handle)
             fieldnames = set(reader.fieldnames or [])
             if not required_columns.issubset(fieldnames):
+                return False
+            if block_idx > 1 and not stage_columns.issubset(fieldnames):
                 return False
 
             row_count = 0
@@ -107,6 +115,20 @@ def is_complete_buffer(output_dir, block_idx, args):
                     return False
                 if not (0 <= sample_idx < args.completions_per_prefix):
                     return False
+                if block_idx > 1:
+                    try:
+                        stage_start = int(row["stage_start_token"])
+                        stage_end = int(row["stage_end_token"])
+                        completion_len = int(row["completion_token_len"])
+                    except (TypeError, ValueError):
+                        return False
+                    expected_stage_start = min(max((block_idx - 1) * args.block_size, 0), args.max_completion_tokens)
+                    if stage_start != expected_stage_start:
+                        return False
+                    if stage_end - stage_start != completion_len:
+                        return False
+                    if completion_len > args.block_size:
+                        return False
                 per_example_counts.setdefault(example_idx, set()).add(sample_idx)
 
             if row_count != expected_rows:

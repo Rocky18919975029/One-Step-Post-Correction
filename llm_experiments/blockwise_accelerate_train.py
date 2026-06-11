@@ -213,6 +213,8 @@ def train_scored_block(args):
     if args.max_examples is not None:
         allowed = set(buffer_df["example_idx"].drop_duplicates().head(args.max_examples))
         buffer_df = buffer_df[buffer_df["example_idx"].isin(allowed)].copy()
+    if args.loss_level == "token" and "completion_token_len" in buffer_df.columns:
+        buffer_df = buffer_df[buffer_df["completion_token_len"].astype(int) > 0].copy()
 
     model_name = resolve_model_name(args.model)
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
