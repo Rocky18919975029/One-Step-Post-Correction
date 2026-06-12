@@ -42,13 +42,26 @@ PREFIX_FLOW_SCORE_COLUMNS = {
     "ref_policy",
     "log_v0",
     "log_vk",
+    "proposal_temperature",
     "token_logp_ref",
 }
 
 
-def completion_token_logprob_lists(model, sequences, prompt_lens, attention_masks, eos_token_id):
+def completion_token_logprob_lists(
+    model,
+    sequences,
+    prompt_lens,
+    attention_masks,
+    eos_token_id,
+    *,
+    logprob_temperature=1.0,
+):
+    if logprob_temperature <= 0:
+        raise ValueError("logprob_temperature must be positive.")
     output = model(sequences, attention_mask=attention_masks)
     logits = output.logits[:, :-1, :]
+    if logprob_temperature != 1.0:
+        logits = logits / float(logprob_temperature)
     labels = sequences[:, 1:]
 
     rows = []
@@ -95,7 +108,18 @@ def encode_text_pairs(tokenizer, prefixes, completions, device):
     return encode_buffer_group(tokenizer, rows, device)
 
 
-def score_text_pairs(model, tokenizer, prefixes, completions, device, batch_size, *, token_values=False, desc="score pairs"):
+def score_text_pairs(
+    model,
+    tokenizer,
+    prefixes,
+    completions,
+    device,
+    batch_size,
+    *,
+    token_values=False,
+    logprob_temperature=1.0,
+    desc="score pairs",
+):
     logp_values = torch.empty(len(prefixes), dtype=torch.float64)
     token_logp_values = [None] * len(prefixes)
     with torch.no_grad():
@@ -114,6 +138,7 @@ def score_text_pairs(model, tokenizer, prefixes, completions, device, batch_size
                     prompt_lens,
                     attention_masks,
                     tokenizer.eos_token_id,
+                    logprob_temperature=logprob_temperature,
                 )
                 logp = torch.stack([values.sum() for values in token_logps])
                 for offset, values in enumerate(token_logps):
@@ -121,13 +146,24 @@ def score_text_pairs(model, tokenizer, prefixes, completions, device, batch_size
                         float(x) for x in values.detach().cpu().double().tolist()
                     ]
             else:
-                logp = completion_logprob(
-                    model,
-                    sequences,
-                    prompt_lens,
-                    attention_masks,
-                    tokenizer.eos_token_id,
-                )
+                if logprob_temperature == 1.0:
+                    logp = completion_logprob(
+                        model,
+                        sequences,
+                        prompt_lens,
+                        attention_masks,
+                        tokenizer.eos_token_id,
+                    )
+                else:
+                    token_logps = completion_token_logprob_lists(
+                        model,
+                        sequences,
+                        prompt_lens,
+                        attention_masks,
+                        tokenizer.eos_token_id,
+                        logprob_temperature=logprob_temperature,
+                    )
+                    logp = torch.stack([values.sum() for values in token_logps])
             sync_cuda_if_available()
             logp_values[start:end] = logp.detach().cpu().double()
     return logp_values.numpy(), token_logp_values
@@ -249,6 +285,7 @@ def score_prefix_flow_columns(df, args):
         )
 
     batch_size = max(1, int(args.score_batch_size))
+    proposal_temperature = float(args.proposal_temperature)
     prompt_text = df["prefix_text"].fillna("").astype(str).tolist()
     prefix_completion = df["completion"].fillna("").astype(str).tolist()
     future_text = df["future_text"].fillna("").astype(str).tolist()
@@ -271,6 +308,7 @@ def score_prefix_flow_columns(df, args):
         prefix_completion,
         device,
         batch_size,
+        logprob_temperature=proposal_temperature,
         desc="score prefix old",
     )
     logp_ref_future, _ = score_text_pairs(
@@ -289,6 +327,7 @@ def score_prefix_flow_columns(df, args):
         future_text,
         device,
         batch_size,
+        logprob_temperature=proposal_temperature,
         desc="score future old",
     )
 
@@ -297,6 +336,7 @@ def score_prefix_flow_columns(df, args):
     df["logp_ref_future"] = logp_ref_future
     df["logp_theta_future"] = logp_old_future
     df["token_logp_ref"] = [dump_float_list(values or []) for values in token_ref_values]
+    df["proposal_temperature"] = proposal_temperature
     return df
 
 
@@ -404,7 +444,7 @@ def run_score_worker(args, df):
     if args.loss_level == "token":
         shard_columns.extend(["token_logp_ref", "token_logp_theta_score"])
     if args.loss_level == "prefix_flow_token":
-        shard_columns.extend(["token_logp_ref", "logp_ref_future", "logp_theta_future"])
+        shard_columns.extend(["token_logp_ref", "logp_ref_future", "logp_theta_future", "proposal_temperature"])
     shard_df[shard_columns].to_csv(output_path, index=False)
     print(f"Wrote score shard {args.score_shard_idx}: rows={len(shard_df)} path={output_path}", flush=True)
 
@@ -506,7 +546,7 @@ def run_parallel_score(args, df, buffer_path):
         for column in ["token_logp_ref", "token_logp_theta_score"]:
             merged[column] = scored[column].to_numpy()
     if args.loss_level == "prefix_flow_token":
-        for column in ["token_logp_ref", "logp_ref_future", "logp_theta_future"]:
+        for column in ["token_logp_ref", "logp_ref_future", "logp_theta_future", "proposal_temperature"]:
             merged[column] = scored[column].to_numpy()
     shutil.rmtree(shard_dir, ignore_errors=True)
     return add_targets_and_z(merged, args)
@@ -557,6 +597,7 @@ def main():
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token", "prefix_flow_token"])
     parser.add_argument("--ref_policy", type=str, default="base", choices=["base", "old"])
+    parser.add_argument("--proposal_temperature", type=float, default=1.0)
     parser.add_argument("--score_num_workers", type=int, default=1)
     parser.add_argument("--score_shard_idx", type=int, default=None)
     parser.add_argument("--score_shard_output", type=str, default=None)

@@ -31,7 +31,7 @@ DEBUG_HANDLE = None
 QUIET_DEBUG_LOGS = False
 PRECOMPUTED_SCORE_COLUMNS = {"ref_policy", "logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
 PRECOMPUTED_TOKEN_SCORE_COLUMNS = {"token_logp_ref", "token_logp_theta_score", "token_log_z_hat", "token_tb_target"}
-PRECOMPUTED_PREFIX_FLOW_COLUMNS = {"ref_policy", "log_v0", "log_vk", "token_logp_ref"}
+PRECOMPUTED_PREFIX_FLOW_COLUMNS = {"ref_policy", "log_v0", "log_vk", "proposal_temperature", "token_logp_ref"}
 
 
 def clear_cuda():

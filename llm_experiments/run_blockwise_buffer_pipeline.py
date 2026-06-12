@@ -87,7 +87,7 @@ def is_complete_buffer(output_dir, block_idx, args):
         "full_partial_completion_token_len",
         "full_partial_completion",
     }
-    prefix_flow_score_columns = {"ref_policy", "log_v0", "log_vk", "token_logp_ref"}
+    prefix_flow_score_columns = {"ref_policy", "log_v0", "log_vk", "proposal_temperature", "token_logp_ref"}
     prefix_flow_raw_columns = {"future_idx", "future_text", "future_token_len"}
     if getattr(args, "loss_level", "sequence") == "prefix_flow_token":
         future_count = args.future_completions_per_partial if args.future_completions_per_partial is not None else args.completions_per_prefix
@@ -175,7 +175,7 @@ def is_scored_buffer(output_dir, block_idx, args):
         return False
     required_score_columns = {"ref_policy", "logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
     if getattr(args, "loss_level", "sequence") == "prefix_flow_token":
-        required_score_columns = {"ref_policy", "log_v0", "log_vk", "token_logp_ref"}
+        required_score_columns = {"ref_policy", "log_v0", "log_vk", "proposal_temperature", "token_logp_ref"}
     elif getattr(args, "loss_level", "sequence") == "token":
         required_score_columns = required_score_columns | {
             "token_logp_ref",
@@ -285,6 +285,8 @@ def build_score_command(args, block_idx, output_dir):
     adapter_dir = checkpoint_adapter_dir(output_dir)
     if block_idx > 1 and adapter_dir.exists():
         command.extend(["--adapter_path", str(adapter_dir)])
+    if args.loss_level == "prefix_flow_token":
+        command.extend(["--proposal_temperature", str(args.temperature)])
     return command
 
 
