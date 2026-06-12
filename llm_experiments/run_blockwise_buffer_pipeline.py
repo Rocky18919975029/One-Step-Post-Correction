@@ -252,6 +252,10 @@ def build_sampler_command(args, block_idx, output_dir):
 
 def build_score_command(args, block_idx, output_dir):
     score_workers = args.score_num_workers or len(parse_gpu_list(args.train_gpus))
+    print(
+        f"Building score command for block {block_idx}: score_workers={score_workers} train_gpus={args.train_gpus}",
+        flush=True,
+    )
     command = [
         sys.executable,
         "blockwise_score_buffer.py",
@@ -552,6 +556,11 @@ def main():
     score_env = base_env.copy()
     score_env["CUDA_VISIBLE_DEVICES"] = args.train_gpus
     score_env["MASTER_PORT"] = str(args.train_master_port + 2)
+    print(
+        f"Pipeline GPU config: sampler_gpus={args.sampler_gpus} train_gpus={args.train_gpus} "
+        f"score_env_cuda={score_env['CUDA_VISIBLE_DEVICES']} score_num_workers={args.score_num_workers}",
+        flush=True,
+    )
 
     start_block = read_next_block_idx(output_dir)
     if start_block > args.num_blocks:

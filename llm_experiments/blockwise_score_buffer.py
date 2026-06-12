@@ -421,6 +421,10 @@ def visible_gpu_ids():
 def run_parallel_score(args, df, buffer_path):
     num_workers = max(1, int(args.score_num_workers))
     gpu_ids = visible_gpu_ids()
+    print(
+        f"Score setup: requested_workers={num_workers} visible_gpus={gpu_ids} CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}",
+        flush=True,
+    )
     if gpu_ids and num_workers > len(gpu_ids):
         print(
             f"Requested score_num_workers={num_workers}, but only {len(gpu_ids)} visible GPUs; using {len(gpu_ids)}.",
@@ -477,7 +481,7 @@ def run_parallel_score(args, df, buffer_path):
             env["CUDA_VISIBLE_DEVICES"] = gpu_ids[shard_idx]
         commands.append((command, env, shard_path))
 
-    print(f"Launching {num_workers} score workers for {buffer_path.name}", flush=True)
+    print(f"Launching {num_workers} score workers for {buffer_path.name} on GPUs {gpu_ids[:num_workers]}", flush=True)
     processes = [subprocess.Popen(command, env=env) for command, env, _ in commands]
     failures = []
     for shard_idx, process in enumerate(processes):

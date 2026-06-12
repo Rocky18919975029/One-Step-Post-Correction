@@ -147,6 +147,13 @@ print(f"torch={torch.__version__}", flush=True)
 PY
 echo "CUDA_LAUNCH_BLOCKING=$CUDA_LAUNCH_BLOCKING"
 
+if [[ -z "$SCORE_NUM_WORKERS" ]]; then
+  IFS=',' read -r -a train_gpu_array <<< "$TRAIN_GPUS"
+  SCORE_NUM_WORKERS="${#train_gpu_array[@]}"
+fi
+echo "TRAIN_GPUS=$TRAIN_GPUS"
+echo "SCORE_NUM_WORKERS=$SCORE_NUM_WORKERS"
+
 cmd=(
   "$PYTHON_BIN" run_blockwise_buffer_pipeline.py
   --gpu 0
@@ -225,9 +232,7 @@ if [[ -n "$MAX_EXAMPLES" ]]; then
   cmd+=(--max_examples "$MAX_EXAMPLES")
 fi
 
-if [[ -n "$SCORE_NUM_WORKERS" ]]; then
-  cmd+=(--score_num_workers "$SCORE_NUM_WORKERS")
-fi
+cmd+=(--score_num_workers "$SCORE_NUM_WORKERS")
 
 printf 'Running command:\n'
 printf ' %q' "${cmd[@]}"
