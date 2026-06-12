@@ -1,6 +1,5 @@
 import argparse
 import json
-import math
 import os
 from pathlib import Path
 import shutil
@@ -36,13 +35,6 @@ TOKEN_SCORE_COLUMNS = {
     "token_logp_theta_score",
     "token_log_z_hat",
     "token_tb_target",
-}
-
-PREFIX_FLOW_SCORE_COLUMNS = {
-    "ref_policy",
-    "log_v0",
-    "log_vk",
-    "token_logp_ref",
 }
 
 
@@ -82,55 +74,6 @@ def split_bounds(total, num_shards, shard_idx):
     start = shard_idx * base + min(shard_idx, extra)
     end = start + base + (1 if shard_idx < extra else 0)
     return start, end
-
-
-def encode_text_pairs(tokenizer, prefixes, completions, device):
-    rows = pd.DataFrame(
-        {
-            "prefix_text": ["" if pd.isna(value) else str(value) for value in prefixes],
-            "completion": ["" if pd.isna(value) else str(value) for value in completions],
-            "reward": [0.0] * len(prefixes),
-        }
-    )
-    return encode_buffer_group(tokenizer, rows, device)
-
-
-def score_text_pairs(model, tokenizer, prefixes, completions, device, batch_size, *, token_values=False, desc="score pairs"):
-    logp_values = torch.empty(len(prefixes), dtype=torch.float64)
-    token_logp_values = [None] * len(prefixes)
-    with torch.no_grad():
-        for start in tqdm(range(0, len(prefixes), batch_size), desc=desc):
-            end = min(start + batch_size, len(prefixes))
-            sequences, prompt_lens, attention_masks, _ = encode_text_pairs(
-                tokenizer,
-                prefixes[start:end],
-                completions[start:end],
-                device,
-            )
-            if token_values:
-                token_logps = completion_token_logprob_lists(
-                    model,
-                    sequences,
-                    prompt_lens,
-                    attention_masks,
-                    tokenizer.eos_token_id,
-                )
-                logp = torch.stack([values.sum() for values in token_logps])
-                for offset, values in enumerate(token_logps):
-                    token_logp_values[start + offset] = [
-                        float(x) for x in values.detach().cpu().double().tolist()
-                    ]
-            else:
-                logp = completion_logprob(
-                    model,
-                    sequences,
-                    prompt_lens,
-                    attention_masks,
-                    tokenizer.eos_token_id,
-                )
-            sync_cuda_if_available()
-            logp_values[start:end] = logp.detach().cpu().double()
-    return logp_values.numpy(), token_logp_values
 
 
 def score_logprob_columns(df, args):
@@ -223,87 +166,7 @@ def score_logprob_columns(df, args):
     return df
 
 
-def score_prefix_flow_columns(df, args):
-    model_name = resolve_model_name(args.model)
-    tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    actor = load_lora_model(
-        model_name,
-        args.torch_dtype,
-        device,
-        Path(args.adapter_path) if args.adapter_path else None,
-        attn_implementation=args.attn_implementation,
-    )
-    actor.eval()
-    if args.ref_policy == "old":
-        ref_model = actor
-    else:
-        ref_model = load_reference_model(
-            model_name,
-            args.torch_dtype,
-            device,
-            attn_implementation=args.attn_implementation,
-        )
-
-    batch_size = max(1, int(args.score_batch_size))
-    prompt_text = df["prefix_text"].fillna("").astype(str).tolist()
-    prefix_completion = df["completion"].fillna("").astype(str).tolist()
-    future_text = df["future_text"].fillna("").astype(str).tolist()
-    future_prefix = [prompt + prefix for prompt, prefix in zip(prompt_text, prefix_completion)]
-
-    logp_ref_prefix, token_ref_values = score_text_pairs(
-        ref_model,
-        tokenizer,
-        prompt_text,
-        prefix_completion,
-        device,
-        batch_size,
-        token_values=True,
-        desc="score prefix ref",
-    )
-    logp_old_prefix, _ = score_text_pairs(
-        actor,
-        tokenizer,
-        prompt_text,
-        prefix_completion,
-        device,
-        batch_size,
-        desc="score prefix old",
-    )
-    logp_ref_future, _ = score_text_pairs(
-        ref_model,
-        tokenizer,
-        future_prefix,
-        future_text,
-        device,
-        batch_size,
-        desc="score future ref",
-    )
-    logp_old_future, _ = score_text_pairs(
-        actor,
-        tokenizer,
-        future_prefix,
-        future_text,
-        device,
-        batch_size,
-        desc="score future old",
-    )
-
-    df["logp_ref"] = logp_ref_prefix
-    df["logp_theta_score"] = logp_old_prefix
-    df["logp_ref_future"] = logp_ref_future
-    df["logp_theta_future"] = logp_old_future
-    df["token_logp_ref"] = [dump_float_list(values or []) for values in token_ref_values]
-    return df
-
-
 def add_targets_and_z(df, args):
-    if args.loss_level == "prefix_flow_token":
-        return add_prefix_flow_targets(df, args)
-
     df["ref_policy"] = args.ref_policy
     df["tb_target"] = args.alpha * df["logp_ref"] + df["reward"].astype(float) / args.beta
     log_z_terms = args.alpha * df["logp_ref"] - df["logp_theta_score"] + df["reward"].astype(float) / args.beta
@@ -344,50 +207,6 @@ def add_targets_and_z(df, args):
     return df
 
 
-def logmeanexp(values):
-    values = [float(value) for value in values]
-    if not values:
-        return float("-inf")
-    max_value = max(values)
-    return max_value + math.log(sum(math.exp(value - max_value) for value in values) / len(values))
-
-
-def add_prefix_flow_targets(df, args):
-    df["ref_policy"] = args.ref_policy
-    reward = df["reward"].astype(float)
-    df["future_value_term"] = (
-        args.alpha * df["logp_ref_future"].astype(float)
-        - df["logp_theta_future"].astype(float)
-        + reward / args.beta
-    )
-    prefix_group = ["example_idx", "sample_idx"]
-    df["log_vk"] = df["future_value_term"].groupby([df[column] for column in prefix_group]).transform(logmeanexp)
-
-    prefix_rows = []
-    for _, group in df.groupby(prefix_group, sort=False):
-        first = group.iloc[0].copy()
-        first["log_vk"] = float(group["log_vk"].iloc[0])
-        first["future_reward_mean"] = float(group["reward"].astype(float).mean())
-        first["future_any_correct"] = bool((group["reward"].astype(float) > 0).any())
-        first["reward"] = first["future_reward_mean"]
-        prefix_rows.append(first)
-
-    prefix_df = pd.DataFrame(prefix_rows).reset_index(drop=True)
-    root_terms = (
-        args.alpha * prefix_df["logp_ref"].astype(float)
-        - prefix_df["logp_theta_score"].astype(float)
-        + prefix_df["log_vk"].astype(float)
-    )
-    prefix_df["root_value_term"] = root_terms
-    prefix_df["log_v0"] = root_terms.groupby(prefix_df["example_idx"]).transform(logmeanexp)
-
-    # Compatibility columns keep existing diagnostics usable.
-    prefix_df["log_z_hat"] = prefix_df["log_v0"]
-    prefix_df["tb_target"] = args.alpha * prefix_df["logp_ref"].astype(float) + prefix_df["log_vk"].astype(float)
-    prefix_df["ref_policy"] = args.ref_policy
-    return prefix_df
-
-
 def run_score_worker(args, df):
     if args.score_shard_output is None:
         raise ValueError("--score_shard_output is required for score shard workers.")
@@ -395,16 +214,11 @@ def run_score_worker(args, df):
     start, end = split_bounds(total, args.score_num_workers, args.score_shard_idx)
     shard_df = df.iloc[start:end].copy()
     shard_df["__score_row_idx"] = list(range(start, end))
-    if args.loss_level == "prefix_flow_token":
-        shard_df = score_prefix_flow_columns(shard_df, args)
-    else:
-        shard_df = score_logprob_columns(shard_df, args)
+    shard_df = score_logprob_columns(shard_df, args)
     output_path = Path(args.score_shard_output)
     shard_columns = ["__score_row_idx", "logp_ref", "logp_theta_score"]
     if args.loss_level == "token":
         shard_columns.extend(["token_logp_ref", "token_logp_theta_score"])
-    if args.loss_level == "prefix_flow_token":
-        shard_columns.extend(["token_logp_ref", "logp_ref_future", "logp_theta_future"])
     shard_df[shard_columns].to_csv(output_path, index=False)
     print(f"Wrote score shard {args.score_shard_idx}: rows={len(shard_df)} path={output_path}", flush=True)
 
@@ -428,10 +242,7 @@ def run_parallel_score(args, df, buffer_path):
         )
         num_workers = len(gpu_ids)
     if num_workers <= 1:
-        if args.loss_level == "prefix_flow_token":
-            scored_df = score_prefix_flow_columns(df.copy(), args)
-        else:
-            scored_df = score_logprob_columns(df.copy(), args)
+        scored_df = score_logprob_columns(df.copy(), args)
         return add_targets_and_z(scored_df, args)
 
     shard_dir = buffer_path.parent / f".{buffer_path.name}.score_shards"
@@ -501,9 +312,6 @@ def run_parallel_score(args, df, buffer_path):
     if args.loss_level == "token":
         for column in ["token_logp_ref", "token_logp_theta_score"]:
             merged[column] = scored[column].to_numpy()
-    if args.loss_level == "prefix_flow_token":
-        for column in ["token_logp_ref", "logp_ref_future", "logp_theta_future"]:
-            merged[column] = scored[column].to_numpy()
     shutil.rmtree(shard_dir, ignore_errors=True)
     return add_targets_and_z(merged, args)
 
@@ -514,14 +322,7 @@ def score_buffer(args):
         raise FileNotFoundError(f"Missing buffer: {buffer_path}")
 
     df = pd.read_csv(buffer_path)
-    for column in ["prefix_text", "completion", "future_text"]:
-        if column in df.columns:
-            df[column] = df[column].fillna("")
-
-    if args.loss_level == "prefix_flow_token":
-        required_columns = PREFIX_FLOW_SCORE_COLUMNS
-    else:
-        required_columns = SCORE_COLUMNS | (TOKEN_SCORE_COLUMNS if args.loss_level == "token" else set())
+    required_columns = SCORE_COLUMNS | (TOKEN_SCORE_COLUMNS if args.loss_level == "token" else set())
     if required_columns.issubset(df.columns) and not args.force and args.score_shard_idx is None:
         print(f"Buffer already has score columns: {buffer_path}", flush=True)
         return
@@ -551,7 +352,7 @@ def main():
     parser.add_argument("--completions_per_prefix", type=int, default=4)
     parser.add_argument("--alpha", type=float, default=4.0)
     parser.add_argument("--beta", type=float, default=1.0)
-    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token", "prefix_flow_token"])
+    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token"])
     parser.add_argument("--ref_policy", type=str, default="base", choices=["base", "old"])
     parser.add_argument("--score_num_workers", type=int, default=1)
     parser.add_argument("--score_shard_idx", type=int, default=None)

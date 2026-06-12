@@ -14,11 +14,7 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from blockwise_power_tb_buffer_train import (
-    PRECOMPUTED_PREFIX_FLOW_COLUMNS,
-    PRECOMPUTED_SCORE_COLUMNS,
-    PRECOMPUTED_TOKEN_SCORE_COLUMNS,
-)
+from blockwise_power_tb_buffer_train import PRECOMPUTED_SCORE_COLUMNS, PRECOMPUTED_TOKEN_SCORE_COLUMNS
 from blockwise_power_tb_train import (
     completion_logprob,
     completion_end,
@@ -37,10 +33,6 @@ def has_precomputed_scores(df):
 
 def has_precomputed_token_scores(df):
     return PRECOMPUTED_TOKEN_SCORE_COLUMNS.issubset(df.columns) and not df[list(PRECOMPUTED_TOKEN_SCORE_COLUMNS)].isna().any().any()
-
-
-def has_precomputed_prefix_flow_scores(df):
-    return PRECOMPUTED_PREFIX_FLOW_COLUMNS.issubset(df.columns) and not df[list(PRECOMPUTED_PREFIX_FLOW_COLUMNS)].isna().any().any()
 
 
 def parse_float_list(value):
@@ -104,23 +96,6 @@ class ScoredBufferCollator:
                     "token_tb_target": token_target_tensor,
                     "token_logp_ref": token_ref_tensor,
                     "token_mask": token_mask,
-                }
-            )
-        elif self.loss_level == "prefix_flow_token":
-            token_ref = [parse_float_list(row["token_logp_ref"]) for row in rows]
-            max_len = max(len(values) for values in token_ref) if token_ref else 0
-            token_mask = torch.zeros((len(rows), max_len), dtype=torch.bool)
-            token_ref_tensor = torch.zeros((len(rows), max_len), dtype=torch.float32)
-            for row_idx, ref_values in enumerate(token_ref):
-                length = len(ref_values)
-                token_mask[row_idx, :length] = True
-                token_ref_tensor[row_idx, :length] = torch.tensor(ref_values, dtype=torch.float32)
-            batch.update(
-                {
-                    "token_logp_ref": token_ref_tensor,
-                    "token_mask": token_mask,
-                    "log_v0": torch.tensor([float(row["log_v0"]) for row in rows], dtype=torch.float32),
-                    "log_vk": torch.tensor([float(row["log_vk"]) for row in rows], dtype=torch.float32),
                 }
             )
         return batch
@@ -234,13 +209,7 @@ def train_scored_block(args):
         raise FileNotFoundError(f"Missing scored buffer: {buffer_path}")
 
     buffer_df = pd.read_csv(buffer_path)
-    if args.loss_level == "prefix_flow_token":
-        if not has_precomputed_prefix_flow_scores(buffer_df):
-            missing = sorted(PRECOMPUTED_PREFIX_FLOW_COLUMNS.difference(buffer_df.columns))
-            raise ValueError(
-                f"Buffer is not prefix-flow token scored. Missing/invalid columns: {missing or sorted(PRECOMPUTED_PREFIX_FLOW_COLUMNS)}"
-            )
-    elif args.loss_level == "token":
+    if args.loss_level == "token":
         required = PRECOMPUTED_SCORE_COLUMNS | PRECOMPUTED_TOKEN_SCORE_COLUMNS
         if not (has_precomputed_scores(buffer_df) and has_precomputed_token_scores(buffer_df)):
             missing = sorted(required.difference(buffer_df.columns))
@@ -252,7 +221,7 @@ def train_scored_block(args):
     if args.max_examples is not None:
         allowed = set(buffer_df["example_idx"].drop_duplicates().head(args.max_examples))
         buffer_df = buffer_df[buffer_df["example_idx"].isin(allowed)].copy()
-    if args.loss_level in {"token", "prefix_flow_token"} and "completion_token_len" in buffer_df.columns:
+    if args.loss_level == "token" and "completion_token_len" in buffer_df.columns:
         buffer_df = buffer_df[buffer_df["completion_token_len"].astype(int) > 0].copy()
 
     model_name = resolve_model_name(args.model)
@@ -305,38 +274,7 @@ def train_scored_block(args):
         )
         for batch_idx, batch in enumerate(dataloader):
             with accelerator.accumulate(model):
-                if args.loss_level == "prefix_flow_token":
-                    token_mask = batch["token_mask"].to(batch["input_ids"].device)
-                    token_logp_theta, model_token_mask = completion_token_logprob_padded(
-                        model,
-                        batch["input_ids"],
-                        batch["prompt_lens"],
-                        batch["attention_mask"],
-                        tokenizer.eos_token_id,
-                        batch["token_logp_ref"].shape[1],
-                    )
-                    token_mask = token_mask & model_token_mask
-                    token_ref = batch["token_logp_ref"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
-                    token_mask_float = token_mask.to(token_logp_theta.dtype)
-                    token_counts = token_mask_float.sum(dim=1)
-                    valid_rows = token_counts > 0
-                    flow_gap = (
-                        batch["log_v0"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
-                        - batch["log_vk"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
-                    )
-                    token_residual = token_logp_theta - args.alpha * token_ref + flow_gap.unsqueeze(1) / token_counts.clamp_min(1.0).unsqueeze(1)
-                    token_sq = token_residual.pow(2) * token_mask_float
-                    per_row_loss = token_sq.sum(dim=1) / token_counts.clamp_min(1.0)
-                    loss = per_row_loss[valid_rows].mean()
-                    logp_theta = (token_logp_theta * token_mask_float).sum(dim=1)
-                    logp_ref_metric = (token_ref * token_mask_float).sum(dim=1)
-                    log_z_hat_metric = batch["log_v0"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
-                    target_metric = args.alpha * logp_ref_metric + batch["log_vk"].to(
-                        token_logp_theta.device,
-                        dtype=token_logp_theta.dtype,
-                    )
-                    residual_metric = log_z_hat_metric + logp_theta - target_metric
-                elif args.loss_level == "token":
+                if args.loss_level == "token":
                     token_mask = batch["token_mask"].to(batch["input_ids"].device)
                     token_logp_theta, model_token_mask = completion_token_logprob_padded(
                         model,
@@ -494,7 +432,6 @@ def main():
     parser.add_argument("--completions_per_prefix", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--alpha", type=float, default=4.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--torch_dtype", type=str, default="bfloat16")
     parser.add_argument("--attn_implementation", type=str, default="eager", choices=["eager", "sdpa", "flash_attention_2"])
@@ -503,7 +440,7 @@ def main():
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
     parser.add_argument("--start_step", type=int, default=0)
     parser.add_argument("--log_every", type=int, default=1)
-    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token", "prefix_flow_token"])
+    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token"])
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="one-step-post-correction")
     parser.add_argument("--wandb_entity", type=str, default=None)

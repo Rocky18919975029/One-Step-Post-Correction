@@ -87,18 +87,7 @@ def is_complete_buffer(output_dir, block_idx, args):
         "full_partial_completion_token_len",
         "full_partial_completion",
     }
-    prefix_flow_score_columns = {"ref_policy", "log_v0", "log_vk", "token_logp_ref"}
-    prefix_flow_raw_columns = {"future_idx", "future_text", "future_token_len"}
-    if getattr(args, "loss_level", "sequence") == "prefix_flow_token":
-        future_count = args.future_completions_per_partial if args.future_completions_per_partial is not None else args.completions_per_prefix
-        raw_samples_per_example = args.completions_per_prefix * future_count
-        scored_samples_per_example = args.completions_per_prefix
-    else:
-        raw_samples_per_example = args.completions_per_prefix
-        scored_samples_per_example = args.completions_per_prefix
-    expected_rows = args.max_examples * raw_samples_per_example
-    expected_samples_per_example = raw_samples_per_example
-    prefix_flow_is_scored = False
+    expected_rows = args.max_examples * args.completions_per_prefix
     per_example_counts = {}
 
     try:
@@ -107,13 +96,6 @@ def is_complete_buffer(output_dir, block_idx, args):
             fieldnames = set(reader.fieldnames or [])
             if not required_columns.issubset(fieldnames):
                 return False
-            if getattr(args, "loss_level", "sequence") == "prefix_flow_token":
-                if prefix_flow_score_columns.issubset(fieldnames):
-                    prefix_flow_is_scored = True
-                    expected_samples_per_example = scored_samples_per_example
-                    expected_rows = args.max_examples * scored_samples_per_example
-                elif not prefix_flow_raw_columns.issubset(fieldnames):
-                    return False
             if args.block_train_mode == "incremental" and block_idx > 1 and not stage_columns.issubset(fieldnames):
                 return False
 
@@ -131,8 +113,7 @@ def is_complete_buffer(output_dir, block_idx, args):
                     return False
                 if not (0 <= example_idx < args.max_examples):
                     return False
-                sample_upper_bound = args.completions_per_prefix if getattr(args, "loss_level", "sequence") == "prefix_flow_token" else expected_samples_per_example
-                if not (0 <= sample_idx < sample_upper_bound):
+                if not (0 <= sample_idx < args.completions_per_prefix):
                     return False
                 if args.block_train_mode == "incremental" and block_idx > 1:
                     try:
@@ -148,16 +129,7 @@ def is_complete_buffer(output_dir, block_idx, args):
                         return False
                     if completion_len > args.block_size:
                         return False
-                if getattr(args, "loss_level", "sequence") == "prefix_flow_token" and not prefix_flow_is_scored:
-                    try:
-                        future_idx = int(row["future_idx"])
-                    except (TypeError, ValueError):
-                        return False
-                    if not (0 <= future_idx < (args.future_completions_per_partial if args.future_completions_per_partial is not None else args.completions_per_prefix)):
-                        return False
-                    per_example_counts.setdefault(example_idx, set()).add((sample_idx, future_idx))
-                else:
-                    per_example_counts.setdefault(example_idx, set()).add(sample_idx)
+                per_example_counts.setdefault(example_idx, set()).add(sample_idx)
 
             if row_count != expected_rows:
                 return False
@@ -166,7 +138,7 @@ def is_complete_buffer(output_dir, block_idx, args):
 
     if len(per_example_counts) != args.max_examples:
         return False
-    return all(len(sample_ids) == expected_samples_per_example for sample_ids in per_example_counts.values())
+    return all(len(sample_ids) == args.completions_per_prefix for sample_ids in per_example_counts.values())
 
 
 def is_scored_buffer(output_dir, block_idx, args):
@@ -174,9 +146,7 @@ def is_scored_buffer(output_dir, block_idx, args):
     if not is_complete_buffer(output_dir, block_idx, args):
         return False
     required_score_columns = {"ref_policy", "logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
-    if getattr(args, "loss_level", "sequence") == "prefix_flow_token":
-        required_score_columns = {"ref_policy", "log_v0", "log_vk", "token_logp_ref"}
-    elif getattr(args, "loss_level", "sequence") == "token":
+    if getattr(args, "loss_level", "sequence") == "token":
         required_score_columns = required_score_columns | {
             "token_logp_ref",
             "token_logp_theta_score",
@@ -215,8 +185,6 @@ def build_sampler_command(args, block_idx, output_dir):
         str(args.block_size),
         "--block_train_mode",
         args.block_train_mode,
-        "--loss_level",
-        args.loss_level,
         "--completions_per_prefix",
         str(args.completions_per_prefix),
         "--future_completions_per_partial",
@@ -311,8 +279,6 @@ def build_train_command(args, block_idx, output_dir):
         str(args.epochs),
         "--lr",
         str(args.lr),
-        "--alpha",
-        str(args.alpha),
         "--seed",
         str(args.seed),
         "--attn_implementation",
@@ -466,7 +432,7 @@ def main():
     parser.add_argument("--micro_batch_size", type=int, default=1)
     parser.add_argument("--score_batch_size", type=int, default=1)
     parser.add_argument("--score_num_workers", type=int, default=None)
-    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token", "prefix_flow_token"])
+    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token"])
     parser.add_argument("--ref_policy", type=str, default="base", choices=["base", "old"])
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--num_blocks", type=int, default=None)

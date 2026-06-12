@@ -31,7 +31,6 @@ DEBUG_HANDLE = None
 QUIET_DEBUG_LOGS = False
 PRECOMPUTED_SCORE_COLUMNS = {"ref_policy", "logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
 PRECOMPUTED_TOKEN_SCORE_COLUMNS = {"token_logp_ref", "token_logp_theta_score", "token_log_z_hat", "token_tb_target"}
-PRECOMPUTED_PREFIX_FLOW_COLUMNS = {"ref_policy", "log_v0", "log_vk", "token_logp_ref"}
 
 
 def clear_cuda():
@@ -123,12 +122,6 @@ def partial_completion_token_limit(block_idx, args):
     return min(block_idx * args.block_size, args.max_completion_tokens)
 
 
-def decode_token_slice(tokenizer, token_ids):
-    if not token_ids:
-        return ""
-    return tokenizer.decode(token_ids, skip_special_tokens=False)
-
-
 def stage_completion_slices(tokenizer, prompt_text, partial_completion, block_idx, args):
     stage_end = partial_completion_token_limit(block_idx, args)
     partial_ids = tokenizer.encode(partial_completion, add_special_tokens=False)
@@ -209,20 +202,6 @@ def generate_stage_buffer(
 ):
     prompt_model = resolve_prompt_model_key(args.model, getattr(args, "prompt_model", None))
     prompts = [format_prompt(row["prompt"], prompt_model, tokenizer, cot=True) for row in dataset]
-    if getattr(args, "loss_level", "sequence") == "prefix_flow_token":
-        return generate_prefix_flow_stage_buffer(
-            model_name,
-            tokenizer,
-            dataset,
-            prompts,
-            block_idx,
-            args,
-            adapter_path,
-            output_dir,
-            example_idx_offset=example_idx_offset,
-            buffer_path_override=buffer_path_override,
-        )
-
     stage_token_limit = partial_completion_token_limit(block_idx, args)
     future_completions_per_partial = (
         args.future_completions_per_partial
@@ -332,122 +311,6 @@ def generate_stage_buffer(
         buffer_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(records).to_csv(buffer_path, index=False)
     print(f"Saved buffer {buffer_path}: {len(records)} samples", flush=True)
-    return buffer_path
-
-
-def generate_prefix_flow_stage_buffer(
-    model_name,
-    tokenizer,
-    dataset,
-    prompts,
-    block_idx,
-    args,
-    adapter_path,
-    output_dir,
-    *,
-    example_idx_offset=0,
-    buffer_path_override=None,
-):
-    prefix_token_limit = partial_completion_token_limit(block_idx, args)
-    future_token_budget = max(args.max_completion_tokens - prefix_token_limit, 0)
-    future_rollouts_per_prefix = (
-        args.future_completions_per_partial
-        if args.future_completions_per_partial is not None
-        else args.completions_per_prefix
-    )
-
-    llm, sampling_params_cls, lora_request = load_vllm(model_name, args, adapter_path)
-    try:
-        prefix_outputs = vllm_generate_texts(
-            llm,
-            sampling_params_cls,
-            lora_request,
-            prompts,
-            args,
-            max_tokens=prefix_token_limit,
-            n=args.completions_per_prefix,
-            desc=f"block {block_idx} prefix generation",
-        )
-
-        future_prompts = []
-        prefix_metadata = []
-        for local_example_idx, (row, prompt_text, prefixes) in enumerate(zip(dataset, prompts, prefix_outputs)):
-            example_idx = example_idx_offset + local_example_idx
-            for sample_idx, prefix_completion in enumerate(prefixes):
-                prefix_ids = tokenizer.encode(prefix_completion, add_special_tokens=False)
-                if len(prefix_ids) > prefix_token_limit:
-                    prefix_ids = prefix_ids[:prefix_token_limit]
-                    prefix_completion = decode_token_slice(tokenizer, prefix_ids)
-                future_prompts.append(prompt_text + prefix_completion)
-                prefix_metadata.append(
-                    {
-                        "example_idx": example_idx,
-                        "sample_idx": sample_idx,
-                        "question": row["prompt"],
-                        "correct_answer": row["answer"],
-                        "prompt_text": prompt_text,
-                        "prefix_text": prompt_text,
-                        "prefix_token_len": len(tokenizer.encode(prompt_text)),
-                        "completion": prefix_completion,
-                        "completion_token_len": len(prefix_ids),
-                    }
-                )
-
-        if future_token_budget > 0:
-            future_outputs = vllm_generate_texts(
-                llm,
-                sampling_params_cls,
-                lora_request,
-                future_prompts,
-                args,
-                max_tokens=future_token_budget,
-                n=future_rollouts_per_prefix,
-                desc=f"block {block_idx} future value rollouts",
-            )
-        else:
-            future_outputs = [["" for _ in range(future_rollouts_per_prefix)] for _ in future_prompts]
-    finally:
-        del llm
-        clear_cuda()
-
-    records = []
-    for meta, futures in zip(prefix_metadata, future_outputs):
-        for future_idx, future_text in enumerate(futures):
-            future_ids = tokenizer.encode(future_text, add_special_tokens=False)
-            full_completion = meta["completion"] + future_text
-            reward, parsed = score_completion(full_completion, meta["correct_answer"])
-            records.append(
-                {
-                    "block_idx": block_idx,
-                    "example_idx": meta["example_idx"],
-                    "sample_idx": meta["sample_idx"],
-                    "future_idx": future_idx,
-                    "question": meta["question"],
-                    "correct_answer": meta["correct_answer"],
-                    "prefix_token_len": meta["prefix_token_len"],
-                    "prefix_text": meta["prefix_text"],
-                    "completion_token_len": meta["completion_token_len"],
-                    "completion": meta["completion"],
-                    "future_text": future_text,
-                    "future_token_len": len(future_ids),
-                    "full_completion": full_completion,
-                    "full_completion_token_len": meta["completion_token_len"] + len(future_ids),
-                    "stage_end_token": meta["completion_token_len"],
-                    "parsed_answer": parsed if reward > 0 else None,
-                    "has_boxed_answer": parsed is not None,
-                    "reward": float(reward),
-                }
-            )
-
-    if buffer_path_override is None:
-        buffer_dir = output_dir / "buffers"
-        buffer_dir.mkdir(parents=True, exist_ok=True)
-        buffer_path = buffer_dir / f"block_{block_idx}.csv"
-    else:
-        buffer_path = Path(buffer_path_override)
-        buffer_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(records).to_csv(buffer_path, index=False)
-    print(f"Saved prefix-flow raw buffer {buffer_path}: {len(records)} rollouts", flush=True)
     return buffer_path
 
 
