@@ -176,7 +176,7 @@ def is_scored_buffer(output_dir, block_idx, args):
     required_score_columns = {"ref_policy", "logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
     if getattr(args, "loss_level", "sequence") == "prefix_flow_token":
         required_score_columns = {"ref_policy", "log_v0", "log_vk", "proposal_temperature", "token_logp_ref"}
-    elif getattr(args, "loss_level", "sequence") == "token":
+    elif getattr(args, "loss_level", "sequence") in {"token", "token_moving_anchor"}:
         required_score_columns = required_score_columns | {
             "token_logp_ref",
             "token_logp_theta_score",
@@ -325,6 +325,8 @@ def build_train_command(args, block_idx, output_dir):
         args.attn_implementation,
         "--loss_level",
         args.loss_level,
+        "--ratio_clip_epsilon",
+        str(args.ratio_clip_epsilon),
         "--log_every",
         str(args.wandb_log_every if args.wandb_log_every is not None else 1),
     ]
@@ -472,7 +474,12 @@ def main():
     parser.add_argument("--micro_batch_size", type=int, default=1)
     parser.add_argument("--score_batch_size", type=int, default=1)
     parser.add_argument("--score_num_workers", type=int, default=None)
-    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token", "prefix_flow_token"])
+    parser.add_argument(
+        "--loss_level",
+        type=str,
+        default="sequence",
+        choices=["sequence", "token", "token_moving_anchor", "prefix_flow_token"],
+    )
     parser.add_argument("--ref_policy", type=str, default="base", choices=["base", "old"])
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--num_blocks", type=int, default=None)
@@ -484,6 +491,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.25)
     parser.add_argument("--alpha", type=float, default=4.0)
     parser.add_argument("--beta", type=float, default=1.0)
+    parser.add_argument("--ratio_clip_epsilon", type=float, default=0.2)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--attn_implementation", type=str, default="eager", choices=["eager", "sdpa", "flash_attention_2"])

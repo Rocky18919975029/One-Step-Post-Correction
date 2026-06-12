@@ -210,7 +210,7 @@ def score_logprob_columns(df, args):
                 batch_df,
                 device,
             )
-            if args.loss_level == "token":
+            if args.loss_level in {"token", "token_moving_anchor"}:
                 token_ref = completion_token_logprob_lists(
                     ref_model,
                     sequences,
@@ -245,7 +245,7 @@ def score_logprob_columns(df, args):
             sync_cuda_if_available()
             logp_ref_values[start:end] = logp_ref.detach().cpu().double()
             logp_theta_values[start:end] = logp_theta.detach().cpu().double()
-            if args.loss_level == "token":
+            if args.loss_level in {"token", "token_moving_anchor"}:
                 for offset, values in enumerate(token_ref):
                     token_ref_values[start + offset] = [float(x) for x in values.detach().cpu().double().tolist()]
                 for offset, values in enumerate(token_theta):
@@ -253,7 +253,7 @@ def score_logprob_columns(df, args):
 
     df["logp_ref"] = logp_ref_values.numpy()
     df["logp_theta_score"] = logp_theta_values.numpy()
-    if args.loss_level == "token":
+    if args.loss_level in {"token", "token_moving_anchor"}:
         df["token_logp_ref"] = [dump_float_list(values or []) for values in token_ref_values]
         df["token_logp_theta_score"] = [dump_float_list(values or []) for values in token_theta_values]
     return df
@@ -349,7 +349,7 @@ def add_targets_and_z(df, args):
     log_z_terms = args.alpha * df["logp_ref"] - df["logp_theta_score"] + df["reward"].astype(float) / args.beta
     df["log_z_hat"] = log_z_terms.groupby(df["example_idx"]).transform("mean")
 
-    if args.loss_level == "token":
+    if args.loss_level in {"token", "token_moving_anchor"}:
         token_ref_values = [parse_float_list(value) for value in df["token_logp_ref"].tolist()]
         token_theta_values = [parse_float_list(value) for value in df["token_logp_theta_score"].tolist()]
         token_targets = []
@@ -441,7 +441,7 @@ def run_score_worker(args, df):
         shard_df = score_logprob_columns(shard_df, args)
     output_path = Path(args.score_shard_output)
     shard_columns = ["__score_row_idx", "logp_ref", "logp_theta_score"]
-    if args.loss_level == "token":
+    if args.loss_level in {"token", "token_moving_anchor"}:
         shard_columns.extend(["token_logp_ref", "token_logp_theta_score"])
     if args.loss_level == "prefix_flow_token":
         shard_columns.extend(["token_logp_ref", "logp_ref_future", "logp_theta_future", "proposal_temperature"])
@@ -542,7 +542,7 @@ def run_parallel_score(args, df, buffer_path):
     merged = df.copy()
     for column in ["logp_ref", "logp_theta_score"]:
         merged[column] = scored[column].to_numpy()
-    if args.loss_level == "token":
+    if args.loss_level in {"token", "token_moving_anchor"}:
         for column in ["token_logp_ref", "token_logp_theta_score"]:
             merged[column] = scored[column].to_numpy()
     if args.loss_level == "prefix_flow_token":
@@ -565,7 +565,9 @@ def score_buffer(args):
     if args.loss_level == "prefix_flow_token":
         required_columns = PREFIX_FLOW_SCORE_COLUMNS
     else:
-        required_columns = SCORE_COLUMNS | (TOKEN_SCORE_COLUMNS if args.loss_level == "token" else set())
+        required_columns = SCORE_COLUMNS | (
+            TOKEN_SCORE_COLUMNS if args.loss_level in {"token", "token_moving_anchor"} else set()
+        )
     if required_columns.issubset(df.columns) and not args.force and args.score_shard_idx is None:
         print(f"Buffer already has score columns: {buffer_path}", flush=True)
         return
@@ -595,7 +597,12 @@ def main():
     parser.add_argument("--completions_per_prefix", type=int, default=4)
     parser.add_argument("--alpha", type=float, default=4.0)
     parser.add_argument("--beta", type=float, default=1.0)
-    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token", "prefix_flow_token"])
+    parser.add_argument(
+        "--loss_level",
+        type=str,
+        default="sequence",
+        choices=["sequence", "token", "token_moving_anchor", "prefix_flow_token"],
+    )
     parser.add_argument("--ref_policy", type=str, default="base", choices=["base", "old"])
     parser.add_argument("--proposal_temperature", type=float, default=1.0)
     parser.add_argument("--score_num_workers", type=int, default=1)

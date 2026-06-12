@@ -83,7 +83,7 @@ class ScoredBufferCollator:
             "logp_ref": torch.tensor([float(row["logp_ref"]) for row in rows], dtype=torch.float32),
             "reward": torch.tensor([float(row["reward"]) for row in rows], dtype=torch.float32),
         }
-        if self.loss_level == "token":
+        if self.loss_level in {"token", "token_moving_anchor"}:
             token_z = [parse_float_list(row["token_log_z_hat"]) for row in rows]
             token_target = [parse_float_list(row["token_tb_target"]) for row in rows]
             token_ref = [parse_float_list(row["token_logp_ref"]) for row in rows]
@@ -240,7 +240,7 @@ def train_scored_block(args):
             raise ValueError(
                 f"Buffer is not prefix-flow token scored. Missing/invalid columns: {missing or sorted(PRECOMPUTED_PREFIX_FLOW_COLUMNS)}"
             )
-    elif args.loss_level == "token":
+    elif args.loss_level in {"token", "token_moving_anchor"}:
         required = PRECOMPUTED_SCORE_COLUMNS | PRECOMPUTED_TOKEN_SCORE_COLUMNS
         if not (has_precomputed_scores(buffer_df) and has_precomputed_token_scores(buffer_df)):
             missing = sorted(required.difference(buffer_df.columns))
@@ -252,7 +252,7 @@ def train_scored_block(args):
     if args.max_examples is not None:
         allowed = set(buffer_df["example_idx"].drop_duplicates().head(args.max_examples))
         buffer_df = buffer_df[buffer_df["example_idx"].isin(allowed)].copy()
-    if args.loss_level in {"token", "prefix_flow_token"} and "completion_token_len" in buffer_df.columns:
+    if args.loss_level in {"token", "token_moving_anchor", "prefix_flow_token"} and "completion_token_len" in buffer_df.columns:
         buffer_df = buffer_df[buffer_df["completion_token_len"].astype(int) > 0].copy()
 
     model_name = resolve_model_name(args.model)
@@ -363,6 +363,55 @@ def train_scored_block(args):
                     ).sum(dim=1)
                     log_z_hat_metric = (token_z_hat * token_mask_float).sum(dim=1)
                     target_metric = (token_target * token_mask_float).sum(dim=1)
+                    residual_metric = log_z_hat_metric + logp_theta - target_metric
+                elif args.loss_level == "token_moving_anchor":
+                    if not 0.0 < args.ratio_clip_epsilon < 1.0:
+                        raise ValueError("--ratio_clip_epsilon must be between 0 and 1.")
+                    token_mask = batch["token_mask"].to(batch["input_ids"].device)
+                    anchor_model = accelerator.unwrap_model(model)
+                    was_training = anchor_model.training
+                    anchor_model.eval()
+                    with torch.no_grad():
+                        token_anchor, anchor_token_mask = completion_token_logprob_padded(
+                            anchor_model,
+                            batch["input_ids"],
+                            batch["prompt_lens"],
+                            batch["attention_mask"],
+                            tokenizer.eos_token_id,
+                            batch["token_tb_target"].shape[1],
+                        )
+                    if was_training:
+                        anchor_model.train()
+
+                    token_logp_theta, model_token_mask = completion_token_logprob_padded(
+                        model,
+                        batch["input_ids"],
+                        batch["prompt_lens"],
+                        batch["attention_mask"],
+                        tokenizer.eos_token_id,
+                        batch["token_tb_target"].shape[1],
+                    )
+                    token_mask = token_mask & model_token_mask & anchor_token_mask
+                    token_z_hat = batch["token_log_z_hat"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
+                    token_target = batch["token_tb_target"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
+                    original_target = token_target - token_z_hat
+                    lower = token_anchor + math.log1p(-args.ratio_clip_epsilon)
+                    upper = token_anchor + math.log1p(args.ratio_clip_epsilon)
+                    clipped_target = torch.maximum(torch.minimum(original_target, upper), lower).detach()
+                    token_residual = token_logp_theta - clipped_target
+                    token_mask_float = token_mask.to(token_residual.dtype)
+                    token_counts = token_mask_float.sum(dim=1)
+                    valid_rows = token_counts > 0
+                    token_sq = token_residual.pow(2) * token_mask_float
+                    per_row_loss = token_sq.sum(dim=1) / token_counts.clamp_min(1.0)
+                    loss = per_row_loss[valid_rows].mean()
+                    logp_theta = (token_logp_theta * token_mask_float).sum(dim=1)
+                    logp_ref_metric = (
+                        batch["token_logp_ref"].to(token_logp_theta.device, dtype=token_logp_theta.dtype)
+                        * token_mask_float
+                    ).sum(dim=1)
+                    log_z_hat_metric = (token_z_hat * token_mask_float).sum(dim=1)
+                    target_metric = ((clipped_target + token_z_hat) * token_mask_float).sum(dim=1)
                     residual_metric = log_z_hat_metric + logp_theta - target_metric
                 else:
                     logp_theta = completion_logprob(
@@ -503,7 +552,13 @@ def main():
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
     parser.add_argument("--start_step", type=int, default=0)
     parser.add_argument("--log_every", type=int, default=1)
-    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token", "prefix_flow_token"])
+    parser.add_argument(
+        "--loss_level",
+        type=str,
+        default="sequence",
+        choices=["sequence", "token", "token_moving_anchor", "prefix_flow_token"],
+    )
+    parser.add_argument("--ratio_clip_epsilon", type=float, default=0.2)
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="one-step-post-correction")
     parser.add_argument("--wandb_entity", type=str, default=None)

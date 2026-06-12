@@ -181,7 +181,12 @@ def main():
     parser.add_argument("--max_examples", type=int, default=32)
     parser.add_argument("--block_size", type=int, default=192)
     parser.add_argument("--block_train_mode", type=str, default="cumulative", choices=["cumulative", "incremental"])
-    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token", "prefix_flow_token"])
+    parser.add_argument(
+        "--loss_level",
+        type=str,
+        default="sequence",
+        choices=["sequence", "token", "token_moving_anchor", "prefix_flow_token"],
+    )
     parser.add_argument("--completions_per_prefix", type=int, default=4)
     parser.add_argument("--future_completions_per_partial", type=int, default=None)
     parser.add_argument("--max_completion_tokens", type=int, default=3072)
