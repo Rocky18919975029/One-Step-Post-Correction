@@ -31,7 +31,6 @@ DEBUG_HANDLE = None
 QUIET_DEBUG_LOGS = False
 PRECOMPUTED_SCORE_COLUMNS = {"ref_policy", "logp_ref", "logp_theta_score", "log_z_hat", "tb_target"}
 PRECOMPUTED_TOKEN_SCORE_COLUMNS = {"token_logp_ref", "token_logp_theta_score", "token_log_z_hat", "token_tb_target"}
-PRECOMPUTED_LOCAL_FLOW_COLUMNS = {"ref_policy", "log_v_parent", "log_v_child", "token_logp_ref"}
 
 
 def clear_cuda():
@@ -123,18 +122,6 @@ def partial_completion_token_limit(block_idx, args):
     return min(block_idx * args.block_size, args.max_completion_tokens)
 
 
-def local_flow_stage_bounds(block_idx, args):
-    stage_start = min(max((block_idx - 1) * args.block_size, 0), args.max_completion_tokens)
-    stage_end = min(block_idx * args.block_size, args.max_completion_tokens)
-    return stage_start, stage_end
-
-
-def decode_token_slice(tokenizer, token_ids):
-    if not token_ids:
-        return ""
-    return tokenizer.decode(token_ids, skip_special_tokens=False)
-
-
 def stage_completion_slices(tokenizer, prompt_text, partial_completion, block_idx, args):
     stage_end = partial_completion_token_limit(block_idx, args)
     partial_ids = tokenizer.encode(partial_completion, add_special_tokens=False)
@@ -215,20 +202,6 @@ def generate_stage_buffer(
 ):
     prompt_model = resolve_prompt_model_key(args.model, getattr(args, "prompt_model", None))
     prompts = [format_prompt(row["prompt"], prompt_model, tokenizer, cot=True) for row in dataset]
-    if getattr(args, "loss_level", "sequence") == "local_flow_token":
-        return generate_local_flow_stage_buffer(
-            model_name,
-            tokenizer,
-            dataset,
-            prompts,
-            block_idx,
-            args,
-            adapter_path,
-            output_dir,
-            example_idx_offset=example_idx_offset,
-            buffer_path_override=buffer_path_override,
-        )
-
     stage_token_limit = partial_completion_token_limit(block_idx, args)
     future_completions_per_partial = (
         args.future_completions_per_partial
@@ -338,139 +311,6 @@ def generate_stage_buffer(
         buffer_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(records).to_csv(buffer_path, index=False)
     print(f"Saved buffer {buffer_path}: {len(records)} samples", flush=True)
-    return buffer_path
-
-
-def generate_local_flow_stage_buffer(
-    model_name,
-    tokenizer,
-    dataset,
-    prompts,
-    block_idx,
-    args,
-    adapter_path,
-    output_dir,
-    *,
-    example_idx_offset=0,
-    buffer_path_override=None,
-):
-    stage_start, stage_end = local_flow_stage_bounds(block_idx, args)
-    block_token_budget = max(stage_end - stage_start, 0)
-    suffix_token_budget = max(args.max_completion_tokens - stage_start, 0)
-    future_completions_per_parent = (
-        args.future_completions_per_partial
-        if args.future_completions_per_partial is not None
-        else args.completions_per_prefix
-    )
-
-    llm, sampling_params_cls, lora_request = load_vllm(model_name, args, adapter_path)
-    try:
-        if stage_start > 0:
-            parent_outputs = vllm_generate_texts(
-                llm,
-                sampling_params_cls,
-                lora_request,
-                prompts,
-                args,
-                max_tokens=stage_start,
-                n=args.completions_per_prefix,
-                desc=f"block {block_idx} parent prefix generation",
-            )
-        else:
-            parent_outputs = [[""] for _ in prompts]
-
-        suffix_prompts = []
-        suffix_metadata = []
-        for local_example_idx, (row, prompt_text, parents) in enumerate(zip(dataset, prompts, parent_outputs)):
-            example_idx = example_idx_offset + local_example_idx
-            for parent_idx, parent_completion in enumerate(parents):
-                parent_ids = tokenizer.encode(parent_completion, add_special_tokens=False)
-                if len(parent_ids) > stage_start:
-                    parent_ids = parent_ids[:stage_start]
-                    parent_completion = decode_token_slice(tokenizer, parent_ids)
-                parent_prefix_text = prompt_text + parent_completion
-                suffix_prompts.append(parent_prefix_text)
-                suffix_metadata.append(
-                    {
-                        "example_idx": example_idx,
-                        "parent_idx": parent_idx,
-                        "question": row["prompt"],
-                        "correct_answer": row["answer"],
-                        "prompt_text": prompt_text,
-                        "parent_completion": parent_completion,
-                        "parent_completion_token_len": len(parent_ids),
-                        "prefix_text": parent_prefix_text,
-                        "prefix_token_len": len(tokenizer.encode(parent_prefix_text)),
-                    }
-                )
-
-        suffix_n = args.completions_per_prefix if block_idx == 1 else future_completions_per_parent
-        suffix_outputs = vllm_generate_texts(
-            llm,
-            sampling_params_cls,
-            lora_request,
-            suffix_prompts,
-            args,
-            max_tokens=suffix_token_budget,
-            n=suffix_n,
-            desc=f"block {block_idx} suffix generation",
-        )
-    finally:
-        del llm
-        clear_cuda()
-
-    records = []
-    for meta, suffixes in zip(suffix_metadata, suffix_outputs):
-        for suffix_idx, suffix_text in enumerate(suffixes):
-            suffix_ids = tokenizer.encode(suffix_text, add_special_tokens=False)
-            block_ids = suffix_ids[:block_token_budget]
-            future_ids = suffix_ids[block_token_budget:]
-            block_completion = decode_token_slice(tokenizer, block_ids)
-            future_text = decode_token_slice(tokenizer, future_ids)
-            suffix_text = decode_token_slice(tokenizer, suffix_ids)
-            full_completion = meta["parent_completion"] + suffix_text
-            reward, parsed = score_completion(full_completion, meta["correct_answer"])
-            sample_idx = meta["parent_idx"] * suffix_n + suffix_idx
-            records.append(
-                {
-                    "block_idx": block_idx,
-                    "example_idx": meta["example_idx"],
-                    "sample_idx": sample_idx,
-                    "parent_idx": meta["parent_idx"],
-                    "suffix_idx": suffix_idx,
-                    "question": meta["question"],
-                    "correct_answer": meta["correct_answer"],
-                    "prefix_token_len": meta["prefix_token_len"],
-                    "prefix_text": meta["prefix_text"],
-                    "completion_token_len": len(block_ids),
-                    "completion": block_completion,
-                    "future_text": future_text,
-                    "future_token_len": len(future_ids),
-                    "suffix_text": suffix_text,
-                    "suffix_token_len": len(suffix_ids),
-                    "parent_completion": meta["parent_completion"],
-                    "parent_completion_token_len": meta["parent_completion_token_len"],
-                    "full_completion": full_completion,
-                    "full_completion_token_len": meta["parent_completion_token_len"] + len(suffix_ids),
-                    "stage_start_token": stage_start,
-                    "stage_end_token": stage_start + len(block_ids),
-                    "parsed_answer": parsed if reward > 0 else None,
-                    "has_boxed_answer": parsed is not None,
-                    "reward": float(reward),
-                    "future_reward_mean": float(reward),
-                    "future_any_correct": bool(reward > 0),
-                }
-            )
-
-    if buffer_path_override is None:
-        buffer_dir = output_dir / "buffers"
-        buffer_dir.mkdir(parents=True, exist_ok=True)
-        buffer_path = buffer_dir / f"block_{block_idx}.csv"
-    else:
-        buffer_path = Path(buffer_path_override)
-        buffer_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(records).to_csv(buffer_path, index=False)
-    print(f"Saved local-flow buffer {buffer_path}: {len(records)} samples", flush=True)
     return buffer_path
 
 

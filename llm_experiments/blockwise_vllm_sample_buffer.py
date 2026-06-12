@@ -66,8 +66,6 @@ def build_worker_command(args, start_idx, end_idx, output_path):
         str(args.block_size),
         "--block_train_mode",
         args.block_train_mode,
-        "--loss_level",
-        args.loss_level,
         "--completions_per_prefix",
         str(args.completions_per_prefix),
         "--future_completions_per_partial",
@@ -167,7 +165,7 @@ def run_sharded_sampling(args):
         output_path.unlink(missing_ok=True)
     temp_dir.rmdir()
     debug_log(args.output_dir, f"merged {len(output_paths)} worker shards into {final_path}")
-    print(f"Saved buffer {final_path}: merged {len(output_paths)} shards", flush=True)
+    print(f"Saved buffer {final_path}: {args.max_examples * args.completions_per_prefix} samples", flush=True)
 
 
 def main():
@@ -181,7 +179,6 @@ def main():
     parser.add_argument("--max_examples", type=int, default=32)
     parser.add_argument("--block_size", type=int, default=192)
     parser.add_argument("--block_train_mode", type=str, default="cumulative", choices=["cumulative", "incremental"])
-    parser.add_argument("--loss_level", type=str, default="sequence", choices=["sequence", "token", "local_flow_token"])
     parser.add_argument("--completions_per_prefix", type=int, default=4)
     parser.add_argument("--future_completions_per_partial", type=int, default=None)
     parser.add_argument("--max_completion_tokens", type=int, default=3072)
