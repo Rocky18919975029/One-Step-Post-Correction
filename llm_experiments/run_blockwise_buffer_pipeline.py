@@ -240,6 +240,8 @@ def build_sampler_command(args, block_idx, output_dir):
     ]
     if args.prompt_model is not None:
         command.extend(["--prompt_model", args.prompt_model])
+    if args.future_temperature is not None:
+        command.extend(["--future_temperature", str(args.future_temperature)])
     adapter_dir = checkpoint_adapter_dir(output_dir)
     if block_idx > 1 and adapter_dir.exists():
         command.extend(["--adapter_path", str(adapter_dir)])
@@ -489,6 +491,7 @@ def main():
     parser.add_argument("--future_completions_per_partial", type=int, default=None)
     parser.add_argument("--max_completion_tokens", type=int, default=3072)
     parser.add_argument("--temperature", type=float, default=0.25)
+    parser.add_argument("--future_temperature", type=float, default=None)
     parser.add_argument("--alpha", type=float, default=4.0)
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--ratio_clip_epsilon", type=float, default=0.2)

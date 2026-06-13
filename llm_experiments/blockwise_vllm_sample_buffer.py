@@ -96,6 +96,8 @@ def build_worker_command(args, start_idx, end_idx, output_path):
         str(output_path),
         "--worker_mode",
     ]
+    if args.future_temperature is not None:
+        command.extend(["--future_temperature", str(args.future_temperature)])
     if args.prompt_model is not None:
         command.extend(["--prompt_model", args.prompt_model])
     if args.adapter_path:
@@ -191,6 +193,7 @@ def main():
     parser.add_argument("--future_completions_per_partial", type=int, default=None)
     parser.add_argument("--max_completion_tokens", type=int, default=3072)
     parser.add_argument("--temperature", type=float, default=0.25)
+    parser.add_argument("--future_temperature", type=float, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--vllm_dtype", type=str, default="bfloat16")
     parser.add_argument("--vllm_tensor_parallel_size", type=int, default=1)

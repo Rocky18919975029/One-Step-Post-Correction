@@ -103,11 +103,22 @@ def load_vllm(model_name, args, adapter_path=None):
     return llm, SamplingParams, lora_request
 
 
-def vllm_generate_texts(llm, sampling_params_cls, lora_request, prompts, args, max_tokens=None, n=1, desc="vLLM generate"):
+def vllm_generate_texts(
+    llm,
+    sampling_params_cls,
+    lora_request,
+    prompts,
+    args,
+    max_tokens=None,
+    n=1,
+    temperature=None,
+    desc="vLLM generate",
+):
     max_tokens = args.max_completion_tokens if max_tokens is None else max_tokens
+    temperature = args.temperature if temperature is None else temperature
     sampling_params = sampling_params_cls(
         n=n,
-        temperature=args.temperature,
+        temperature=temperature,
         max_tokens=max_tokens,
     )
     generated = []
@@ -229,6 +240,13 @@ def generate_stage_buffer(
         if args.future_completions_per_partial is not None
         else args.completions_per_prefix
     )
+    future_temperature = (
+        args.future_temperature
+        if getattr(args, "future_temperature", None) is not None
+        else args.temperature
+    )
+    if future_temperature == 0.0 and future_completions_per_partial != 1:
+        raise ValueError("Greedy future sampling requires --future_completions_per_partial 1.")
     future_token_budget = max(args.max_completion_tokens - stage_token_limit, 0)
     llm, sampling_params_cls, lora_request = load_vllm(model_name, args, adapter_path)
     try:
@@ -277,6 +295,7 @@ def generate_stage_buffer(
                 args,
                 max_tokens=future_token_budget,
                 n=future_completions_per_partial,
+                temperature=future_temperature,
                 desc=f"block {block_idx} future reward generation",
             )
         else:
@@ -355,6 +374,13 @@ def generate_prefix_flow_stage_buffer(
         if args.future_completions_per_partial is not None
         else args.completions_per_prefix
     )
+    future_temperature = (
+        args.future_temperature
+        if getattr(args, "future_temperature", None) is not None
+        else args.temperature
+    )
+    if future_temperature == 0.0:
+        raise ValueError("prefix_flow_token requires a stochastic future proposal with positive temperature.")
 
     llm, sampling_params_cls, lora_request = load_vllm(model_name, args, adapter_path)
     try:
@@ -402,6 +428,7 @@ def generate_prefix_flow_stage_buffer(
                 args,
                 max_tokens=future_token_budget,
                 n=future_rollouts_per_prefix,
+                temperature=future_temperature,
                 desc=f"block {block_idx} future value rollouts",
             )
         else:
