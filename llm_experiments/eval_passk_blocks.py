@@ -94,7 +94,7 @@ def run_worker(args):
         max_model_len=args.vllm_max_model_len,
         enforce_eager=args.vllm_enforce_eager,
         disable_custom_all_reduce=args.vllm_disable_custom_all_reduce,
-        seed=args.seed + args.shard_idx,
+        seed=args.seed,
     )
     lora_request = None if adapter_path is None else LoRARequest("adapter", 1, str(adapter_path))
     sampling_params = SamplingParams(
