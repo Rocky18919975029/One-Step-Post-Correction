@@ -176,7 +176,12 @@ def merge_block_results(args, block_idx, shard_paths, block_dir):
 
 def run_controller(args):
     gpu_ids = parse_visible_devices()
-    if len(gpu_ids) < args.num_shards:
+    if args.slurm_srun:
+        if not os.environ.get("SLURM_JOB_ID"):
+            raise RuntimeError("--slurm_srun requires a running Slurm allocation.")
+        if args.num_shards != args.slurm_nodes * args.shards_per_node:
+            raise ValueError("--num_shards must equal --slurm_nodes * --shards_per_node.")
+    elif len(gpu_ids) < args.num_shards:
         raise RuntimeError(f"Need {args.num_shards} visible GPUs, found {gpu_ids}.")
     if args.num_samples < max(args.k_values):
         raise ValueError("--num_samples must be at least the largest requested k.")
@@ -198,54 +203,75 @@ def run_controller(args):
         if shard_dir.exists():
             shutil.rmtree(shard_dir)
         shard_dir.mkdir(parents=True, exist_ok=True)
-        processes = []
         shard_paths = []
         print(f"Evaluating block {block_idx} on {args.num_shards} GPUs", flush=True)
         for shard_idx in range(args.num_shards):
             shard_path = shard_dir / f"shard_{shard_idx}.jsonl"
             shard_paths.append(shard_path)
-            command = [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--worker",
-                "--output_dir", args.output_dir,
-                "--block_idx", block_idx,
-                "--eval_data_path", args.eval_data_path,
-                "--model", args.model,
-                "--prompt_model", args.prompt_model,
-                "--eval_examples", str(args.eval_examples),
-                "--num_samples", str(args.num_samples),
-                "--temperature", str(args.temperature),
-                "--top_p", str(args.top_p),
-                "--max_new_tokens", str(args.max_new_tokens),
-                "--prompt_batch_size", str(args.prompt_batch_size),
-                "--vllm_dtype", args.vllm_dtype,
-                "--vllm_gpu_memory_utilization", str(args.vllm_gpu_memory_utilization),
-                "--vllm_max_model_len", str(args.vllm_max_model_len),
-                "--seed", str(args.seed),
-                "--num_shards", str(args.num_shards),
-                "--shard_idx", str(shard_idx),
-                "--shard_output", str(shard_path),
-            ]
-            if args.vllm_enforce_eager:
-                command.append("--vllm_enforce_eager")
-            if args.vllm_disable_custom_all_reduce:
-                command.append("--vllm_disable_custom_all_reduce")
-            if args.save_responses:
-                command.append("--save_responses")
-            env = os.environ.copy()
-            env["CUDA_VISIBLE_DEVICES"] = gpu_ids[shard_idx]
-            env["PYTHONUNBUFFERED"] = "1"
-            env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-            processes.append(subprocess.Popen(command, env=env))
 
-        failures = []
-        for shard_idx, process in enumerate(processes):
-            return_code = process.wait()
-            if return_code != 0:
-                failures.append((shard_idx, return_code))
-        if failures:
-            raise RuntimeError(f"Pass@k worker failures for block {block_idx}: {failures}")
+        worker_command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--worker",
+            "--output_dir", args.output_dir,
+            "--block_idx", block_idx,
+            "--eval_data_path", args.eval_data_path,
+            "--model", args.model,
+            "--prompt_model", args.prompt_model,
+            "--eval_examples", str(args.eval_examples),
+            "--num_samples", str(args.num_samples),
+            "--temperature", str(args.temperature),
+            "--top_p", str(args.top_p),
+            "--max_new_tokens", str(args.max_new_tokens),
+            "--prompt_batch_size", str(args.prompt_batch_size),
+            "--vllm_dtype", args.vllm_dtype,
+            "--vllm_gpu_memory_utilization", str(args.vllm_gpu_memory_utilization),
+            "--vllm_max_model_len", str(args.vllm_max_model_len),
+            "--seed", str(args.seed),
+            "--num_shards", str(args.num_shards),
+        ]
+        if args.vllm_enforce_eager:
+            worker_command.append("--vllm_enforce_eager")
+        if args.vllm_disable_custom_all_reduce:
+            worker_command.append("--vllm_disable_custom_all_reduce")
+        if args.save_responses:
+            worker_command.append("--save_responses")
+
+        if args.slurm_srun:
+            command = [
+                "srun",
+                "--nodes", str(args.slurm_nodes),
+                "--ntasks", str(args.num_shards),
+                "--ntasks-per-node", str(args.shards_per_node),
+                "--gpus-per-task", "1",
+                "--cpus-per-task", str(args.cpus_per_worker),
+                "--gpu-bind", "single:1",
+                "--kill-on-bad-exit", "1",
+                *worker_command,
+                "--shard_output", str(shard_dir / "shard_{shard_idx}.jsonl"),
+            ]
+            subprocess.run(command, check=True)
+        else:
+            processes = []
+            for shard_idx in range(args.num_shards):
+                command = [
+                    *worker_command,
+                    "--shard_idx", str(shard_idx),
+                    "--shard_output", str(shard_paths[shard_idx]),
+                ]
+                env = os.environ.copy()
+                env["CUDA_VISIBLE_DEVICES"] = gpu_ids[shard_idx]
+                env["PYTHONUNBUFFERED"] = "1"
+                env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+                processes.append(subprocess.Popen(command, env=env))
+
+            failures = []
+            for shard_idx, process in enumerate(processes):
+                return_code = process.wait()
+                if return_code != 0:
+                    failures.append((shard_idx, return_code))
+            if failures:
+                raise RuntimeError(f"Pass@k worker failures for block {block_idx}: {failures}")
 
         metrics = merge_block_results(args, block_idx, shard_paths, block_dir)
         all_metrics.append(metrics)
@@ -283,6 +309,10 @@ def main():
     parser.add_argument("--vllm_disable_custom_all_reduce", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_shards", type=int, default=8)
+    parser.add_argument("--slurm_srun", action="store_true")
+    parser.add_argument("--slurm_nodes", type=int, default=1)
+    parser.add_argument("--shards_per_node", type=int, default=8)
+    parser.add_argument("--cpus_per_worker", type=int, default=12)
     parser.add_argument("--run_name", default="temp0.6_top_p0.95_n128")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--save_responses", action="store_true")
@@ -293,8 +323,14 @@ def main():
     args.blocks = parse_blocks(args.blocks)
     args.k_values = [int(item) for item in args.k_values.split(",") if item.strip()]
     if args.worker:
+        if args.shard_idx is None:
+            task_rank = os.environ.get("SLURM_PROCID")
+            if task_rank is not None:
+                args.shard_idx = int(task_rank)
+        if args.shard_output is not None and args.shard_idx is not None:
+            args.shard_output = args.shard_output.format(shard_idx=args.shard_idx)
         if args.block_idx is None or args.shard_idx is None or args.shard_output is None:
-            raise ValueError("Worker mode requires --block_idx, --shard_idx, and --shard_output.")
+            raise ValueError("Worker mode requires a block, shard index, and shard output path.")
         run_worker(args)
     else:
         run_controller(args)

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=ospc-passk
 #SBATCH --partition=acd_u
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
+#SBATCH --nodes=2
+#SBATCH --ntasks=2
+#SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=96
 #SBATCH --mem=640G
@@ -35,7 +36,7 @@ VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-4096}"
 VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-0}"
 SEED="${SEED:-0}"
 RUN_NAME="${RUN_NAME:-temp0.6_top_p0.95_n128}"
-SAVE_RESPONSES="${SAVE_RESPONSES:-0}"
+SAVE_RESPONSES="${SAVE_RESPONSES:-1}"
 FORCE="${FORCE:-0}"
 
 HF_HOME="${HF_HOME:-/data/user/zhongal/.cache/huggingface}"
@@ -78,7 +79,11 @@ cmd=(
   --vllm_gpu_memory_utilization "$VLLM_GPU_MEMORY_UTILIZATION"
   --vllm_max_model_len "$VLLM_MAX_MODEL_LEN"
   --seed "$SEED"
-  --num_shards 8
+  --num_shards 16
+  --slurm_srun
+  --slurm_nodes 2
+  --shards_per_node 8
+  --cpus_per_worker 12
   --run_name "$RUN_NAME"
 )
 
