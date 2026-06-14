@@ -89,6 +89,24 @@ def parse_float_list(value):
     return [float(x) for x in json.loads(value)]
 
 
+def load_actor_model(args, device):
+    actor_name = resolve_model_name(args.actor_model or args.model)
+    if args.full_finetune_actor:
+        return load_reference_model(
+            actor_name,
+            args.torch_dtype,
+            device,
+            attn_implementation=args.attn_implementation,
+        )
+    return load_lora_model(
+        actor_name,
+        args.torch_dtype,
+        device,
+        Path(args.adapter_path) if args.adapter_path else None,
+        attn_implementation=args.attn_implementation,
+    )
+
+
 def split_bounds(total, num_shards, shard_idx):
     base = total // num_shards
     extra = total % num_shards
@@ -176,13 +194,7 @@ def score_logprob_columns(df, args):
         tokenizer.pad_token = tokenizer.eos_token
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    actor = load_lora_model(
-        model_name,
-        args.torch_dtype,
-        device,
-        Path(args.adapter_path) if args.adapter_path else None,
-        attn_implementation=args.attn_implementation,
-    )
+    actor = load_actor_model(args, device)
     actor.eval()
     if args.ref_policy == "old":
         ref_model = actor
@@ -266,13 +278,7 @@ def score_prefix_flow_columns(df, args):
         tokenizer.pad_token = tokenizer.eos_token
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    actor = load_lora_model(
-        model_name,
-        args.torch_dtype,
-        device,
-        Path(args.adapter_path) if args.adapter_path else None,
-        attn_implementation=args.attn_implementation,
-    )
+    actor = load_actor_model(args, device)
     actor.eval()
     if args.ref_policy == "old":
         ref_model = actor
@@ -514,8 +520,14 @@ def run_parallel_score(args, df, buffer_path):
         ]
         if args.adapter_path:
             command.extend(["--adapter_path", args.adapter_path])
+        if args.actor_model:
+            command.extend(["--actor_model", args.actor_model])
+        if args.full_finetune_actor:
+            command.append("--full_finetune_actor")
         if args.attn_implementation:
             command.extend(["--attn_implementation", args.attn_implementation])
+        if args.loss_level == "prefix_flow_token":
+            command.extend(["--proposal_temperature", str(args.proposal_temperature)])
         env = os.environ.copy()
         if gpu_ids:
             env["CUDA_VISIBLE_DEVICES"] = gpu_ids[shard_idx]
@@ -591,6 +603,8 @@ def main():
     parser.add_argument("--buffer_path", type=str, required=True)
     parser.add_argument("--model", type=str, default="qwen")
     parser.add_argument("--adapter_path", type=str, default=None)
+    parser.add_argument("--actor_model", type=str, default=None)
+    parser.add_argument("--full_finetune_actor", action="store_true")
     parser.add_argument("--torch_dtype", type=str, default="bfloat16", choices=["auto", "bfloat16", "float16", "float32"])
     parser.add_argument("--attn_implementation", type=str, default=None, choices=["eager", "sdpa", "flash_attention_2"])
     parser.add_argument("--score_batch_size", type=int, default=1)

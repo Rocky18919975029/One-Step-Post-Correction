@@ -17,6 +17,7 @@ from blockwise_power_tb_train import (
     MODEL_NAME_BY_KEY,
     evaluate_model,
     load_lora_model,
+    load_reference_model,
     load_math_dataset,
     maybe_init_wandb,
     resolve_model_name,
@@ -534,6 +535,7 @@ def main():
     parser.add_argument("--wandb_resume", type=str, default="allow")
     parser.add_argument("--eval_every_block", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
+    parser.add_argument("--full_model_eval", action="store_true")
     parser.add_argument("--eval_backend", type=str, default="hf", choices=["hf", "vllm"])
     parser.add_argument("--eval_examples", type=int, default=100)
     parser.add_argument("--eval_max_new_tokens", type=int, default=3072)
@@ -589,16 +591,24 @@ def main():
                 tokenizer,
                 eval_rows,
                 args,
-                adapter_path=adapter_path,
+                adapter_path=None if args.full_model_eval else adapter_path,
             )
         else:
-            model = load_lora_model(
-                model_name,
-                args.torch_dtype,
-                device,
-                adapter_path,
-                attn_implementation=args.attn_implementation,
-            )
+            if args.full_model_eval:
+                model = load_reference_model(
+                    model_name,
+                    args.torch_dtype,
+                    device,
+                    attn_implementation=args.attn_implementation,
+                )
+            else:
+                model = load_lora_model(
+                    model_name,
+                    args.torch_dtype,
+                    device,
+                    adapter_path,
+                    attn_implementation=args.attn_implementation,
+                )
             eval_metrics = evaluate_model(model, tokenizer, eval_rows, args)
             del model
             clear_cuda()

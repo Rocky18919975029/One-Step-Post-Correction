@@ -18,6 +18,10 @@ def checkpoint_adapter_dir(output_dir):
     return checkpoint_dir(output_dir) / "adapter"
 
 
+def checkpoint_model_dir(output_dir):
+    return checkpoint_dir(output_dir) / "model"
+
+
 def buffer_path(output_dir, block_idx):
     return Path(output_dir) / "buffers" / f"block_{block_idx}.csv"
 
@@ -198,6 +202,9 @@ def is_scored_buffer(output_dir, block_idx, args):
 
 def build_sampler_command(args, block_idx, output_dir):
     sampler_tp_size = args.vllm_tensor_parallel_size
+    policy_model = args.model
+    if args.full_finetune and block_idx > 1 and checkpoint_model_dir(output_dir).exists():
+        policy_model = str(checkpoint_model_dir(output_dir))
     command = [
         sys.executable,
         "blockwise_vllm_sample_buffer.py",
@@ -206,7 +213,7 @@ def build_sampler_command(args, block_idx, output_dir):
         "--output_dir",
         str(output_dir),
         "--model",
-        args.model,
+        policy_model,
         "--block_idx",
         str(block_idx),
         "--max_examples",
@@ -243,7 +250,7 @@ def build_sampler_command(args, block_idx, output_dir):
     if args.future_temperature is not None:
         command.extend(["--future_temperature", str(args.future_temperature)])
     adapter_dir = checkpoint_adapter_dir(output_dir)
-    if block_idx > 1 and adapter_dir.exists():
+    if not args.full_finetune and block_idx > 1 and adapter_dir.exists():
         command.extend(["--adapter_path", str(adapter_dir)])
     if args.vllm_enforce_eager:
         command.append("--vllm_enforce_eager")
@@ -285,7 +292,12 @@ def build_score_command(args, block_idx, output_dir):
         args.ref_policy,
     ]
     adapter_dir = checkpoint_adapter_dir(output_dir)
-    if block_idx > 1 and adapter_dir.exists():
+    if args.full_finetune:
+        actor_model = args.model
+        if block_idx > 1 and checkpoint_model_dir(output_dir).exists():
+            actor_model = str(checkpoint_model_dir(output_dir))
+        command.extend(["--actor_model", actor_model, "--full_finetune_actor"])
+    elif block_idx > 1 and adapter_dir.exists():
         command.extend(["--adapter_path", str(adapter_dir)])
     if args.loss_level == "prefix_flow_token":
         command.extend(["--proposal_temperature", str(args.temperature)])
@@ -332,13 +344,18 @@ def build_train_command(args, block_idx, output_dir):
         "--log_every",
         str(args.wandb_log_every if args.wandb_log_every is not None else 1),
     ]
-    if block_idx > 1 and adapter_dir.exists():
+    if args.full_finetune and block_idx > 1 and checkpoint_model_dir(output_dir).exists():
+        trainer_args[trainer_args.index("--model") + 1] = str(checkpoint_model_dir(output_dir))
+    elif block_idx > 1 and adapter_dir.exists():
         trainer_args.extend(["--adapter_path", str(adapter_dir)])
     ckpt_dir = checkpoint_dir(output_dir)
     if ckpt_dir.exists():
         trainer_args.extend(["--resume_from_checkpoint", str(ckpt_dir)])
     if args.gradient_checkpointing:
         trainer_args.append("--gradient_checkpointing")
+    trainer_args.extend(["--train_backend", args.train_backend])
+    if args.full_finetune:
+        trainer_args.append("--full_finetune")
     if args.save_every_block:
         trainer_args.append("--save_every_block")
     if args.use_wandb:
@@ -379,6 +396,9 @@ def build_train_command(args, block_idx, output_dir):
 
 
 def build_eval_command(args, output_dir):
+    eval_model = args.model
+    if args.full_finetune and checkpoint_model_dir(output_dir).exists():
+        eval_model = str(checkpoint_model_dir(output_dir))
     command = [
         sys.executable,
         "blockwise_power_tb_buffer_train.py",
@@ -387,7 +407,7 @@ def build_eval_command(args, output_dir):
         "--eval_data_path",
         args.eval_data_path,
         "--model",
-        args.model,
+        eval_model,
         "--eval_only",
         "--eval_backend",
         args.eval_backend,
@@ -405,6 +425,8 @@ def build_eval_command(args, output_dir):
         "--debug_dump_timeout_seconds",
         str(args.debug_dump_timeout_seconds),
     ]
+    if args.full_finetune:
+        command.append("--full_model_eval")
     if args.prompt_model is not None:
         command.extend(["--prompt_model", args.prompt_model])
     if args.vllm_enforce_eager:
@@ -462,6 +484,8 @@ def main():
     parser.add_argument("--gpu", type=str, default="0")
     parser.add_argument("--train_gpus", type=str, default=None)
     parser.add_argument("--ddp_train", action="store_true")
+    parser.add_argument("--train_backend", choices=["ddp", "fsdp"], default="ddp")
+    parser.add_argument("--full_finetune", action="store_true")
     parser.add_argument("--sampler_gpus", type=str, default=None)
     parser.add_argument("--train_master_port", type=int, default=29600)
     parser.add_argument("--sampler_master_port", type=int, default=29700)
@@ -544,6 +568,12 @@ def main():
         args.train_gpus = args.gpu
     if args.ddp_train and len(parse_gpu_list(args.train_gpus)) < 2:
         raise ValueError("--ddp_train requires --train_gpus with at least two GPUs, e.g. --train_gpus 0,1.")
+    if args.train_backend == "fsdp" and not args.ddp_train:
+        raise ValueError("--train_backend fsdp requires --ddp_train/torchrun.")
+    if args.train_backend == "fsdp" and not args.full_finetune:
+        raise ValueError("--train_backend fsdp currently requires --full_finetune.")
+    if args.full_finetune and args.train_backend != "fsdp":
+        raise ValueError("--full_finetune currently requires --train_backend fsdp.")
     if args.ddp_train and args.save_every_steps:
         raise ValueError("--save_every_steps is not supported with --ddp_train yet; use --save_every_block.")
 

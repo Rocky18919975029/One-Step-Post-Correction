@@ -64,6 +64,8 @@ MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 SCORE_BATCH_SIZE="${SCORE_BATCH_SIZE:-1}"
 SCORE_NUM_WORKERS="${SCORE_NUM_WORKERS:-}"
 LOSS_LEVEL="${LOSS_LEVEL:-sequence}"
+TRAIN_BACKEND="${TRAIN_BACKEND:-ddp}"
+FULL_FINETUNE="${FULL_FINETUNE:-0}"
 REF_POLICY="${REF_POLICY:-base}"
 EPOCHS="${EPOCHS:-1}"
 NUM_BLOCKS="${NUM_BLOCKS:-16}"
@@ -173,6 +175,7 @@ cmd=(
   --micro_batch_size "$MICRO_BATCH_SIZE"
   --score_batch_size "$SCORE_BATCH_SIZE"
   --loss_level "$LOSS_LEVEL"
+  --train_backend "$TRAIN_BACKEND"
   --ref_policy "$REF_POLICY"
   --epochs "$EPOCHS"
   --num_blocks "$NUM_BLOCKS"
@@ -199,6 +202,12 @@ cmd=(
   --vllm_batch_size "$VLLM_BATCH_SIZE"
   --quiet_debug_logs
 )
+
+case "${FULL_FINETUNE,,}" in
+  1|true|yes|on)
+    cmd+=(--full_finetune)
+    ;;
+esac
 
 if [[ -n "$FUTURE_TEMPERATURE" ]]; then
   cmd+=(--future_temperature "$FUTURE_TEMPERATURE")

@@ -1,6 +1,8 @@
 import argparse
+import inspect
 import json
 import math
+import os
 import random
 import shutil
 from pathlib import Path
@@ -214,6 +216,113 @@ def load_resume_state(checkpoint_dir, optimizer):
     return int(state.get("global_step", 0) or 0), state
 
 
+def load_resume_metadata(checkpoint_dir):
+    if checkpoint_dir is None:
+        return 0, None
+    state_path = Path(checkpoint_dir) / "training_state.pt"
+    if not state_path.exists():
+        return 0, None
+    checkpoint = torch.load(state_path, map_location="cpu", weights_only=False)
+    state = checkpoint.get("state", {})
+    return int(state.get("global_step", 0) or 0), state
+
+
+def build_accelerator(args, gradient_accumulation_steps):
+    kwargs = {"gradient_accumulation_steps": gradient_accumulation_steps}
+    if args.train_backend == "fsdp":
+        try:
+            from accelerate import FullyShardedDataParallelPlugin
+        except ImportError as exc:
+            raise ImportError(
+                "The installed Accelerate version does not expose FullyShardedDataParallelPlugin. "
+                "Upgrade Accelerate before using --train_backend fsdp."
+            ) from exc
+        os.environ["ACCELERATE_USE_FSDP"] = "true"
+        kwargs["mixed_precision"] = "bf16" if args.torch_dtype == "bfloat16" else "fp16"
+        plugin_kwargs = {
+            "sharding_strategy": "FULL_SHARD",
+            "auto_wrap_policy": "transformer_based_wrap",
+            "transformer_cls_names_to_wrap": ["Qwen2DecoderLayer"],
+            "state_dict_type": "SHARDED_STATE_DICT",
+            "use_orig_params": True,
+            "limit_all_gathers": True,
+            "sync_module_states": True,
+            "cpu_ram_efficient_loading": False,
+            "activation_checkpointing": False,
+        }
+        supported = inspect.signature(FullyShardedDataParallelPlugin).parameters
+        kwargs["fsdp_plugin"] = FullyShardedDataParallelPlugin(
+            **{key: value for key, value in plugin_kwargs.items() if key in supported}
+        )
+    return Accelerator(**kwargs)
+
+
+def load_full_model(model_name, args, device):
+    dtype_by_name = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+        "auto": "auto",
+    }
+    model_kwargs = {
+        "torch_dtype": dtype_by_name[args.torch_dtype],
+        "trust_remote_code": True,
+        "low_cpu_mem_usage": True,
+    }
+    if args.attn_implementation is not None:
+        model_kwargs["attn_implementation"] = args.attn_implementation
+    model = transformers.AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    if args.train_backend != "fsdp":
+        model = model.to(device)
+    model.config.use_cache = False
+    for parameter in model.parameters():
+        parameter.requires_grad_(True)
+    trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+    total = sum(parameter.numel() for parameter in model.parameters())
+    print(f"full-finetune params: {trainable:,} / {total:,} ({100.0 * trainable / total:.2f}%)", flush=True)
+    return model
+
+
+def save_full_finetune_outputs(output_dir, block_idx, model, tokenizer, state, accelerator, save_block):
+    output_dir = Path(output_dir)
+    checkpoint_dir = output_dir / "checkpoint_latest"
+    tmp_dir = output_dir / "checkpoint_latest_tmp"
+
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+    accelerator.wait_for_everyone()
+
+    accelerator.save_state(tmp_dir / "accelerate_state")
+    accelerator.state.fsdp_plugin.set_state_dict_type("FULL_STATE_DICT")
+    full_state_dict = accelerator.get_state_dict(model)
+    unwrapped = accelerator.unwrap_model(model)
+    if accelerator.is_main_process:
+        unwrapped.save_pretrained(
+            tmp_dir / "model",
+            state_dict=full_state_dict,
+            safe_serialization=True,
+            max_shard_size="5GB",
+        )
+        tokenizer.save_pretrained(tmp_dir / "model")
+        torch.save({"state": state, "train_backend": "fsdp", "full_finetune": True}, tmp_dir / "training_state.pt")
+    accelerator.wait_for_everyone()
+    accelerator.state.fsdp_plugin.set_state_dict_type("SHARDED_STATE_DICT")
+
+    if accelerator.is_main_process:
+        if checkpoint_dir.exists():
+            shutil.rmtree(checkpoint_dir)
+        tmp_dir.rename(checkpoint_dir)
+        if save_block:
+            block_dir = output_dir / f"block_{block_idx}"
+            if block_dir.exists():
+                shutil.rmtree(block_dir)
+            shutil.copytree(checkpoint_dir / "model", block_dir)
+    accelerator.wait_for_everyone()
+
+
 def should_log_wandb(args, step):
     if args.wandb_log_every <= 0:
         return True
@@ -222,8 +331,9 @@ def should_log_wandb(args, step):
 
 def train_scored_block(args):
     accumulation_rows = max(1, args.batch_size * args.completions_per_prefix)
-    accelerator = Accelerator(
-        gradient_accumulation_steps=max(1, math.ceil(accumulation_rows / args.micro_batch_size))
+    accelerator = build_accelerator(
+        args,
+        max(1, math.ceil(accumulation_rows / args.micro_batch_size)),
     )
     seed_everything(args.seed + accelerator.process_index)
 
@@ -275,19 +385,31 @@ def train_scored_block(args):
     if adapter_path is not None and not adapter_path.exists():
         adapter_path = None
 
-    model = load_lora_model(
-        model_name,
-        args.torch_dtype,
-        accelerator.device,
-        adapter_path,
-        attn_implementation=args.attn_implementation,
-    )
+    if args.full_finetune:
+        model = load_full_model(model_name, args, accelerator.device)
+    else:
+        model = load_lora_model(
+            model_name,
+            args.torch_dtype,
+            accelerator.device,
+            adapter_path,
+            attn_implementation=args.attn_implementation,
+        )
     model.train()
+    if args.gradient_checkpointing and args.train_backend == "fsdp":
+        enable_gradient_checkpointing(model)
     optimizer = torch.optim.AdamW([param for param in model.parameters() if param.requires_grad], lr=args.lr)
-    checkpoint_step, resume_state = load_resume_state(args.resume_from_checkpoint, optimizer)
+    if args.train_backend == "fsdp":
+        checkpoint_step, resume_state = load_resume_metadata(args.resume_from_checkpoint)
+    else:
+        checkpoint_step, resume_state = load_resume_state(args.resume_from_checkpoint, optimizer)
 
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
-    if args.gradient_checkpointing:
+    if args.train_backend == "fsdp" and args.resume_from_checkpoint:
+        accelerate_state = Path(args.resume_from_checkpoint) / "accelerate_state"
+        if accelerate_state.exists():
+            accelerator.load_state(accelerate_state)
+    if args.gradient_checkpointing and args.train_backend != "fsdp":
         enable_gradient_checkpointing(model)
 
     wandb_run = maybe_init_wandb(args, 0 if accelerator.is_main_process else accelerator.process_index, resume_state)
@@ -509,14 +631,27 @@ def train_scored_block(args):
         "global_step": global_step,
         "next_block_idx": args.block_idx + 1,
         "current_block_idx": None,
+        "train_backend": args.train_backend,
+        "full_finetune": args.full_finetune,
         "wandb_id": wandb_run.id if wandb_run is not None else args.wandb_id,
         "wandb_project": args.wandb_project,
         "wandb_entity": args.wandb_entity,
         "wandb_run_name": args.wandb_run_name,
     }
-    if args.save_every_block:
-        save_block_adapter(output_dir, args.block_idx, model, tokenizer, accelerator)
-    save_accelerate_checkpoint(output_dir, model, tokenizer, optimizer, state, accelerator)
+    if args.full_finetune:
+        save_full_finetune_outputs(
+            output_dir,
+            args.block_idx,
+            model,
+            tokenizer,
+            state,
+            accelerator,
+            args.save_every_block,
+        )
+    else:
+        if args.save_every_block:
+            save_block_adapter(output_dir, args.block_idx, model, tokenizer, accelerator)
+        save_accelerate_checkpoint(output_dir, model, tokenizer, optimizer, state, accelerator)
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
@@ -530,7 +665,7 @@ def train_scored_block(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train one pre-scored block with a standard Accelerate/DDP loop.")
+    parser = argparse.ArgumentParser(description="Train one pre-scored block with Accelerate DDP or FSDP full-shard.")
     parser.add_argument("--buffer_path", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--model", type=str, default="qwen")
@@ -548,6 +683,8 @@ def main():
     parser.add_argument("--torch_dtype", type=str, default="bfloat16")
     parser.add_argument("--attn_implementation", type=str, default="eager", choices=["eager", "sdpa", "flash_attention_2"])
     parser.add_argument("--gradient_checkpointing", action="store_true")
+    parser.add_argument("--train_backend", choices=["ddp", "fsdp"], default="ddp")
+    parser.add_argument("--full_finetune", action="store_true")
     parser.add_argument("--save_every_block", action="store_true")
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
     parser.add_argument("--start_step", type=int, default=0)
@@ -567,6 +704,14 @@ def main():
     parser.add_argument("--wandb_resume", type=str, default="allow")
     parser.add_argument("--wandb_log_every", type=int, default=0)
     args = parser.parse_args()
+    if args.train_backend == "fsdp" and not args.full_finetune:
+        raise ValueError("The FSDP backend currently requires --full_finetune.")
+    if args.full_finetune and args.train_backend != "fsdp":
+        raise ValueError("--full_finetune currently requires --train_backend fsdp.")
+    if args.train_backend == "fsdp" and args.torch_dtype != "bfloat16":
+        raise ValueError("The FSDP backend currently requires --torch_dtype bfloat16.")
+    if args.full_finetune and args.adapter_path:
+        raise ValueError("--full_finetune loads a complete model checkpoint and cannot use --adapter_path.")
     train_scored_block(args)
 
 
