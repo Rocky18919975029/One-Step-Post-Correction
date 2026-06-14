@@ -246,7 +246,7 @@ def run_controller(args):
                 "--gpus-per-task", "1",
                 "--cpus-per-task", str(args.cpus_per_worker),
                 "--gpu-bind", "single:1",
-                "--kill-on-bad-exit", "1",
+                "--kill-on-bad-exit=1",
                 *worker_command,
                 "--shard_output", str(shard_dir / "shard_{shard_idx}.jsonl"),
             ]
