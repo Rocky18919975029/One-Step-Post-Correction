@@ -38,3 +38,27 @@ For long-running training on a remote server, periodic restartable checkpoints
 can be enabled with `SAVE_EVERY_STEPS=20`. Intermediate checkpoints contain the
 sharded FSDP model/optimizer state and the exact epoch/dataloader position.
 Block-end checkpoints additionally contain the merged Hugging Face model.
+
+## FSDP performance regression checklist
+
+FSDP depends on fast GPU-to-GPU collectives for parameter all-gathers. On the
+8xH100 nodes, do not inherit the legacy DDP debugging defaults
+`NCCL_P2P_DISABLE=1` or `NCCL_IB_DISABLE=1`. Disabling both transports caused a
+confirmed regression from roughly 13 seconds per optimizer step to roughly 393
+seconds per optimizer step while GPU utilization remained high. This can look
+like a hang, but it is FSDP repeatedly communicating through a slow fallback.
+
+The maintained FSDP entry points therefore default to:
+
+```bash
+NCCL_P2P_DISABLE=0
+NCCL_IB_DISABLE=0
+CUDA_LAUNCH_BLOCKING=0
+```
+
+When a standalone block run is unexpectedly slow, compare its effective launch
+command and environment with `scripts/submit_fsdp_pipeline.slurm` before
+changing model, batch, checkpoint, or optimizer settings. Also remember that
+the tqdm bar advances only after a complete gradient-accumulation cycle and an
+optimizer step; a temporarily unchanged bar is not by itself evidence of a
+deadlock.
