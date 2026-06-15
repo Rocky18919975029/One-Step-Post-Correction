@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +22,13 @@ def resolve_adapter_path(output_dir, block_idx):
     if not (adapter_path / "adapter_model.safetensors").exists():
         raise FileNotFoundError(f"Missing LoRA adapter at {adapter_path}")
     return adapter_path
+
+
+def resolve_result_block_idx(block_idx, model_name, adapter_path):
+    if block_idx != "base" or adapter_path is not None:
+        return block_idx
+    match = re.fullmatch(r"block_(\d+)", Path(model_name).name)
+    return match.group(1) if match else block_idx
 
 
 def main():
@@ -49,6 +57,7 @@ def main():
     output_dir = Path(args.output_dir)
     adapter_path = resolve_adapter_path(output_dir, args.block_idx)
     model_name = resolve_model_name(args.model)
+    result_block_idx = resolve_result_block_idx(args.block_idx, model_name, adapter_path)
     eval_rows = load_math_dataset(args.eval_data_path)[: args.eval_examples]
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
@@ -70,12 +79,13 @@ def main():
 
     metrics = {
         **metrics,
-        "block_idx": args.block_idx,
+        "block_idx": result_block_idx,
+        "model_path": str(model_name),
         "adapter_path": str(adapter_path) if adapter_path is not None else None,
     }
     eval_dir = output_dir / "eval_runs"
     eval_dir.mkdir(parents=True, exist_ok=True)
-    safe_block = str(args.block_idx).replace("/", "_")
+    safe_block = str(result_block_idx).replace("/", "_")
     json_path = eval_dir / f"eval_block_{safe_block}.json"
     csv_path = eval_dir / f"eval_block_{safe_block}.csv"
     json_path.write_text(json.dumps(metrics, indent=2, ensure_ascii=False) + "\n")
