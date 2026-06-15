@@ -62,3 +62,9 @@ changing model, batch, checkpoint, or optimizer settings. Also remember that
 the tqdm bar advances only after a complete gradient-accumulation cycle and an
 optimizer step; a temporarily unchanged bar is not by itself evidence of a
 deadlock.
+
+Periodic sharded checkpoints can be converted to standalone Hugging Face models
+with `scripts/submit_export_fsdp_checkpoint.slurm`. The exporter reconstructs
+the same eight-rank FSDP layout, restores the Accelerate state, and writes only
+the merged model; it does not read a training buffer or perform an optimizer
+step.
