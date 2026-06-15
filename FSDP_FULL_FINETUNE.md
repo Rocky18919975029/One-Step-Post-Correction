@@ -33,3 +33,8 @@ FSDP checkpoints contain:
 Runtime state is sharded to keep optimizer checkpointing scalable. A full
 Hugging Face checkpoint is also materialized because vLLM must load the updated
 policy between blocks.
+
+For long-running training on a remote server, periodic restartable checkpoints
+can be enabled with `SAVE_EVERY_STEPS=20`. Intermediate checkpoints contain the
+sharded FSDP model/optimizer state and the exact epoch/dataloader position.
+Block-end checkpoints additionally contain the merged Hugging Face model.

@@ -63,6 +63,7 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 SCORE_BATCH_SIZE="${SCORE_BATCH_SIZE:-1}"
 SCORE_NUM_WORKERS="${SCORE_NUM_WORKERS:-}"
+SAVE_EVERY_STEPS="${SAVE_EVERY_STEPS:-0}"
 LOSS_LEVEL="${LOSS_LEVEL:-sequence}"
 TRAIN_BACKEND="${TRAIN_BACKEND:-ddp}"
 FULL_FINETUNE="${FULL_FINETUNE:-0}"
@@ -202,6 +203,10 @@ cmd=(
   --vllm_batch_size "$VLLM_BATCH_SIZE"
   --quiet_debug_logs
 )
+
+if [[ "$SAVE_EVERY_STEPS" -gt 0 ]]; then
+  cmd+=(--save_every_steps "$SAVE_EVERY_STEPS")
+fi
 
 case "${FULL_FINETUNE,,}" in
   1|true|yes|on)

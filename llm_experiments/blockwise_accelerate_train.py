@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 import transformers
 from accelerate import Accelerator
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 from tqdm import tqdm
 
 from blockwise_power_tb_buffer_train import (
@@ -65,6 +65,24 @@ class ScoredBufferDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.rows[idx]
+
+
+class EpochSeededRandomSampler(Sampler):
+    def __init__(self, data_source, seed):
+        self.data_source = data_source
+        self.seed = int(seed)
+        self.epoch = 0
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        return iter(torch.randperm(len(self.data_source), generator=generator).tolist())
+
+    def __len__(self):
+        return len(self.data_source)
 
 
 class ScoredBufferCollator:
@@ -323,6 +341,42 @@ def save_full_finetune_outputs(output_dir, block_idx, model, tokenizer, state, a
     accelerator.wait_for_everyone()
 
 
+def save_fsdp_training_checkpoint(output_dir, state, accelerator):
+    output_dir = Path(output_dir)
+    checkpoint_dir = output_dir / "checkpoint_latest"
+    tmp_dir = output_dir / "checkpoint_latest_tmp"
+
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+    accelerator.wait_for_everyone()
+
+    accelerator.save_state(tmp_dir / "accelerate_state")
+    if accelerator.is_main_process:
+        torch.save(
+            {"state": state, "train_backend": "fsdp", "full_finetune": True},
+            tmp_dir / "training_state.pt",
+        )
+    accelerator.wait_for_everyone()
+
+    if accelerator.is_main_process:
+        if checkpoint_dir.exists():
+            shutil.rmtree(checkpoint_dir)
+        tmp_dir.rename(checkpoint_dir)
+    accelerator.wait_for_everyone()
+
+
+def append_metrics(output_dir, metrics):
+    if not metrics:
+        return
+    metrics_path = Path(output_dir) / "metrics.csv"
+    old_metrics = pd.read_csv(metrics_path) if metrics_path.exists() else pd.DataFrame()
+    new_metrics = pd.DataFrame(metrics)
+    pd.concat([old_metrics, new_metrics], ignore_index=True).to_csv(metrics_path, index=False)
+
+
 def should_log_wandb(args, step):
     if args.wandb_log_every <= 0:
         return True
@@ -372,10 +426,12 @@ def train_scored_block(args):
 
     dataset = ScoredBufferDataset(buffer_df, args.completions_per_prefix)
     collator = ScoredBufferCollator(tokenizer, args.loss_level)
+    resumable_sampler = EpochSeededRandomSampler(dataset, args.seed) if args.save_every_steps else None
     dataloader = DataLoader(
         dataset,
         batch_size=args.micro_batch_size,
-        shuffle=True,
+        shuffle=resumable_sampler is None,
+        sampler=resumable_sampler,
         collate_fn=collator,
         num_workers=args.dataloader_num_workers,
         pin_memory=True,
@@ -417,15 +473,35 @@ def train_scored_block(args):
         args.wandb_id = wandb_run.id
 
     global_step = int(args.start_step or checkpoint_step)
+    resume_epoch = 0
+    resume_batches_seen = 0
+    if resume_state and int(resume_state.get("current_block_idx") or -1) == args.block_idx:
+        resume_epoch = int(resume_state.get("epoch", 0) or 0)
+        resume_batches_seen = int(resume_state.get("batches_seen_in_epoch", 0) or 0)
+        if accelerator.is_main_process:
+            print(
+                f"[block {args.block_idx}] resuming epoch={resume_epoch} "
+                f"after dataloader batch={resume_batches_seen} global_step={global_step}",
+                flush=True,
+            )
     metrics = []
-    for epoch in range(args.epochs):
+    for epoch in range(resume_epoch, args.epochs):
+        if resumable_sampler is not None:
+            resumable_sampler.set_epoch(epoch)
+        epoch_dataloader = dataloader
+        skipped_batches = resume_batches_seen if epoch == resume_epoch else 0
+        if skipped_batches:
+            epoch_dataloader = accelerator.skip_first_batches(dataloader, skipped_batches)
         total_optimizer_steps = math.ceil(len(dataloader) / accelerator.gradient_accumulation_steps)
+        completed_optimizer_steps = skipped_batches // accelerator.gradient_accumulation_steps
         progress = tqdm(
             total=total_optimizer_steps,
+            initial=min(completed_optimizer_steps, total_optimizer_steps),
             desc=f"block {args.block_idx} epoch {epoch}",
             disable=not accelerator.is_main_process,
         )
-        for batch_idx, batch in enumerate(dataloader):
+        for resumed_batch_idx, batch in enumerate(epoch_dataloader):
+            batch_idx = skipped_batches + resumed_batch_idx
             with accelerator.accumulate(model):
                 if args.loss_level == "prefix_flow_token":
                     token_mask = batch["token_mask"].to(batch["input_ids"].device)
@@ -625,7 +701,30 @@ def train_scored_block(args):
                         print(record, flush=True)
                     if wandb_run is not None and should_log_wandb(args, global_step):
                         wandb_run.log(record, step=global_step)
+                    if args.save_every_steps > 0 and global_step % args.save_every_steps == 0:
+                        checkpoint_state = {
+                            "global_step": global_step,
+                            "next_block_idx": args.block_idx,
+                            "current_block_idx": args.block_idx,
+                            "epoch": epoch,
+                            "batches_seen_in_epoch": batch_idx + 1,
+                            "wandb_id": wandb_run.id if wandb_run is not None else args.wandb_id,
+                            "wandb_project": args.wandb_project,
+                            "wandb_entity": args.wandb_entity,
+                            "wandb_run_name": args.wandb_run_name,
+                        }
+                        if args.train_backend != "fsdp" or not args.full_finetune:
+                            raise ValueError("--save_every_steps currently requires FSDP full-finetune.")
+                        save_fsdp_training_checkpoint(output_dir, checkpoint_state, accelerator)
+                        if accelerator.is_main_process:
+                            append_metrics(output_dir, metrics)
+                            metrics.clear()
+                            print(
+                                f"[block {args.block_idx}] checkpoint_latest saved at step {global_step}",
+                                flush=True,
+                            )
         progress.close()
+        resume_batches_seen = 0
 
     state = {
         "global_step": global_step,
@@ -655,10 +754,7 @@ def train_scored_block(args):
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        metrics_path = output_dir / "metrics.csv"
-        old_metrics = pd.read_csv(metrics_path) if metrics_path.exists() else pd.DataFrame()
-        new_metrics = pd.DataFrame(metrics)
-        pd.concat([old_metrics, new_metrics], ignore_index=True).to_csv(metrics_path, index=False)
+        append_metrics(output_dir, metrics)
         print(f"[block {args.block_idx}] accelerate checkpoint_latest updated", flush=True)
     if wandb_run is not None:
         wandb_run.finish()
@@ -686,6 +782,7 @@ def main():
     parser.add_argument("--train_backend", choices=["ddp", "fsdp"], default="ddp")
     parser.add_argument("--full_finetune", action="store_true")
     parser.add_argument("--save_every_block", action="store_true")
+    parser.add_argument("--save_every_steps", type=int, default=0)
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
     parser.add_argument("--start_step", type=int, default=0)
     parser.add_argument("--log_every", type=int, default=1)
@@ -712,6 +809,10 @@ def main():
         raise ValueError("The FSDP backend currently requires --torch_dtype bfloat16.")
     if args.full_finetune and args.adapter_path:
         raise ValueError("--full_finetune loads a complete model checkpoint and cannot use --adapter_path.")
+    if args.save_every_steps < 0:
+        raise ValueError("--save_every_steps must be non-negative.")
+    if args.save_every_steps and (args.train_backend != "fsdp" or not args.full_finetune):
+        raise ValueError("--save_every_steps currently requires FSDP full-finetune.")
     train_scored_block(args)
 
 

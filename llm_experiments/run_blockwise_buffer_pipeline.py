@@ -353,6 +353,8 @@ def build_train_command(args, block_idx, output_dir):
         trainer_args.extend(["--resume_from_checkpoint", str(ckpt_dir)])
     if args.gradient_checkpointing:
         trainer_args.append("--gradient_checkpointing")
+    if args.save_every_steps:
+        trainer_args.extend(["--save_every_steps", str(args.save_every_steps)])
     trainer_args.extend(["--train_backend", args.train_backend])
     if args.full_finetune:
         trainer_args.append("--full_finetune")
@@ -574,8 +576,8 @@ def main():
         raise ValueError("--train_backend fsdp currently requires --full_finetune.")
     if args.full_finetune and args.train_backend != "fsdp":
         raise ValueError("--full_finetune currently requires --train_backend fsdp.")
-    if args.ddp_train and args.save_every_steps:
-        raise ValueError("--save_every_steps is not supported with --ddp_train yet; use --save_every_block.")
+    if args.save_every_steps and (args.train_backend != "fsdp" or not args.full_finetune):
+        raise ValueError("--save_every_steps currently requires FSDP full-finetune.")
 
     base_env = os.environ.copy()
     base_env["PYTHONUNBUFFERED"] = "1"
