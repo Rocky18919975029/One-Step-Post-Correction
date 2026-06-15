@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 import transformers
 from accelerate import Accelerator
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from blockwise_power_tb_buffer_train import (
@@ -57,32 +57,22 @@ class ScoredBufferDataset(Dataset):
         if completions_per_prefix is not None:
             df = df[df["sample_idx"] < completions_per_prefix].copy()
         self.rows = df.to_dict("records")
+        self.order = None
         if not self.rows:
             raise ValueError("Scored buffer has no rows after filtering by completions_per_prefix.")
+
+    def set_epoch_order(self, seed, epoch):
+        generator = torch.Generator()
+        generator.manual_seed(int(seed) + int(epoch))
+        self.order = torch.randperm(len(self.rows), generator=generator).tolist()
 
     def __len__(self):
         return len(self.rows)
 
     def __getitem__(self, idx):
+        if self.order is not None:
+            idx = self.order[idx]
         return self.rows[idx]
-
-
-class EpochSeededRandomSampler(Sampler):
-    def __init__(self, data_source, seed):
-        self.data_source = data_source
-        self.seed = int(seed)
-        self.epoch = 0
-
-    def set_epoch(self, epoch):
-        self.epoch = int(epoch)
-
-    def __iter__(self):
-        generator = torch.Generator()
-        generator.manual_seed(self.seed + self.epoch)
-        return iter(torch.randperm(len(self.data_source), generator=generator).tolist())
-
-    def __len__(self):
-        return len(self.data_source)
 
 
 class ScoredBufferCollator:
@@ -426,12 +416,10 @@ def train_scored_block(args):
 
     dataset = ScoredBufferDataset(buffer_df, args.completions_per_prefix)
     collator = ScoredBufferCollator(tokenizer, args.loss_level)
-    resumable_sampler = EpochSeededRandomSampler(dataset, args.seed) if args.save_every_steps else None
     dataloader = DataLoader(
         dataset,
         batch_size=args.micro_batch_size,
-        shuffle=resumable_sampler is None,
-        sampler=resumable_sampler,
+        shuffle=not args.save_every_steps,
         collate_fn=collator,
         num_workers=args.dataloader_num_workers,
         pin_memory=True,
@@ -486,8 +474,8 @@ def train_scored_block(args):
             )
     metrics = []
     for epoch in range(resume_epoch, args.epochs):
-        if resumable_sampler is not None:
-            resumable_sampler.set_epoch(epoch)
+        if args.save_every_steps:
+            dataset.set_epoch_order(args.seed, epoch)
         epoch_dataloader = dataloader
         skipped_batches = resume_batches_seen if epoch == resume_epoch else 0
         if skipped_batches:
