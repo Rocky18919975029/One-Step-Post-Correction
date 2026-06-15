@@ -38,6 +38,8 @@ ADAPTER_PATH="${ADAPTER_PATH:-$SOURCE_OUTPUT_DIR/checkpoint_latest/adapter}"
 RESUME_FROM_CHECKPOINT="${RESUME_FROM_CHECKPOINT:-$SOURCE_OUTPUT_DIR/checkpoint_latest}"
 
 MODEL="${MODEL:-qwen}"
+TRAIN_BACKEND="${TRAIN_BACKEND:-ddp}"
+FULL_FINETUNE="${FULL_FINETUNE:-0}"
 MAX_EXAMPLES="${MAX_EXAMPLES:-}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
@@ -52,6 +54,7 @@ GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-0}"
 LOG_EVERY="${LOG_EVERY:-1}"
+SAVE_EVERY_STEPS="${SAVE_EVERY_STEPS:-0}"
 CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-1}"
 
 USE_WANDB="${USE_WANDB:-0}"
@@ -108,10 +111,18 @@ if [[ ! -f "$BUFFER_PATH" ]]; then
   echo "Missing BUFFER_PATH: $BUFFER_PATH" >&2
   exit 1
 fi
-if [[ ! -d "$ADAPTER_PATH" ]]; then
-  echo "Missing ADAPTER_PATH: $ADAPTER_PATH" >&2
-  exit 1
-fi
+case "${FULL_FINETUNE,,}" in
+  1|true|yes|on)
+    full_finetune=1
+    ;;
+  *)
+    full_finetune=0
+    if [[ ! -d "$ADAPTER_PATH" ]]; then
+      echo "Missing ADAPTER_PATH: $ADAPTER_PATH" >&2
+      exit 1
+    fi
+    ;;
+esac
 
 IFS=',' read -r -a gpu_array <<< "$TRAIN_GPUS"
 nproc="${#gpu_array[@]}"
@@ -130,7 +141,6 @@ cmd=(
   --buffer_path "$BUFFER_PATH"
   --output_dir "$OUTPUT_DIR"
   --model "$MODEL"
-  --adapter_path "$ADAPTER_PATH"
   --resume_from_checkpoint "$RESUME_FROM_CHECKPOINT"
   --block_idx "$BLOCK_IDX"
   --batch_size "$BATCH_SIZE"
@@ -143,6 +153,7 @@ cmd=(
   --seed "$SEED"
   --attn_implementation "$ATTN_IMPLEMENTATION"
   --loss_level "$LOSS_LEVEL"
+  --train_backend "$TRAIN_BACKEND"
   --dataloader_num_workers "$DATALOADER_NUM_WORKERS"
   --log_every "$LOG_EVERY"
   --save_every_block
@@ -150,6 +161,15 @@ cmd=(
   --wandb_resume "$WANDB_RESUME"
   --wandb_log_every "$WANDB_LOG_EVERY"
 )
+
+if [[ "$full_finetune" -eq 1 ]]; then
+  cmd+=(--full_finetune)
+else
+  cmd+=(--adapter_path "$ADAPTER_PATH")
+fi
+if [[ "$SAVE_EVERY_STEPS" -gt 0 ]]; then
+  cmd+=(--save_every_steps "$SAVE_EVERY_STEPS")
+fi
 
 if [[ -n "$MAX_EXAMPLES" ]]; then
   cmd+=(--max_examples "$MAX_EXAMPLES")
