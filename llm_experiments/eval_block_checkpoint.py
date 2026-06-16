@@ -11,24 +11,34 @@ from blockwise_power_tb_buffer_train import evaluate_model_with_vllm
 from blockwise_power_tb_train import evaluate_model, load_lora_model, load_math_dataset, resolve_model_name
 
 
-def resolve_adapter_path(output_dir, block_idx):
+def has_full_model(path):
+    path = Path(path)
+    return (path / "config.json").exists() and bool(list(path.glob("*.safetensors")) or list(path.glob("*.bin")))
+
+
+def resolve_eval_target(output_dir, block_idx, model):
+    model_name = resolve_model_name(model)
     if block_idx == "base":
-        return None
+        return model_name, None, "base"
+
     output_dir = Path(output_dir)
     if block_idx == "latest":
-        adapter_path = output_dir / "checkpoint_latest" / "adapter"
+        checkpoint_dir = output_dir / "checkpoint_latest"
+        adapter_path = checkpoint_dir / "adapter"
+        full_model_path = checkpoint_dir / "model"
     else:
-        adapter_path = output_dir / f"block_{int(block_idx)}"
-    if not (adapter_path / "adapter_model.safetensors").exists():
-        raise FileNotFoundError(f"Missing LoRA adapter at {adapter_path}")
-    return adapter_path
+        block_dir = output_dir / f"block_{int(block_idx)}"
+        adapter_path = block_dir
+        full_model_path = block_dir
 
+    if (adapter_path / "adapter_model.safetensors").exists():
+        return model_name, adapter_path, block_idx
+    if has_full_model(full_model_path):
+        return str(full_model_path), None, block_idx
 
-def resolve_result_block_idx(block_idx, model_name, adapter_path):
-    if block_idx != "base" or adapter_path is not None:
-        return block_idx
-    match = re.fullmatch(r"block_(\d+)", Path(model_name).name)
-    return match.group(1) if match else block_idx
+    raise FileNotFoundError(
+        f"Missing LoRA adapter or full model for block_idx={block_idx} under {output_dir}"
+    )
 
 
 def main():
@@ -55,9 +65,11 @@ def main():
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
-    adapter_path = resolve_adapter_path(output_dir, args.block_idx)
-    model_name = resolve_model_name(args.model)
-    result_block_idx = resolve_result_block_idx(args.block_idx, model_name, adapter_path)
+    model_name, adapter_path, result_block_idx = resolve_eval_target(output_dir, args.block_idx, args.model)
+    if result_block_idx == "base":
+        match = re.fullmatch(r"block_(\d+)", Path(model_name).name)
+        if match:
+            result_block_idx = match.group(1)
     eval_rows = load_math_dataset(args.eval_data_path)[: args.eval_examples]
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
