@@ -31,6 +31,8 @@ EVAL_DATA_PATH="${EVAL_DATA_PATH:-data/MATH500.json}"
 EVAL_BACKEND="${EVAL_BACKEND:-vllm}"
 EVAL_EXAMPLES="${EVAL_EXAMPLES:-500}"
 EVAL_MAX_NEW_TOKENS="${EVAL_MAX_NEW_TOKENS:-3072}"
+EVAL_DO_SAMPLE="${EVAL_DO_SAMPLE:-0}"
+EVAL_TEMPERATURE="${EVAL_TEMPERATURE:-0.25}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 
 VLLM_DTYPE="${VLLM_DTYPE:-bfloat16}"
@@ -82,6 +84,7 @@ cmd=(
   --eval_backend "$EVAL_BACKEND"
   --eval_examples "$EVAL_EXAMPLES"
   --eval_max_new_tokens "$EVAL_MAX_NEW_TOKENS"
+  --eval_temperature "$EVAL_TEMPERATURE"
   --attn_implementation "$ATTN_IMPLEMENTATION"
   --vllm_dtype "$VLLM_DTYPE"
   --vllm_tensor_parallel_size "$VLLM_TENSOR_PARALLEL_SIZE"
@@ -93,6 +96,12 @@ cmd=(
 case "${VLLM_ENFORCE_EAGER,,}" in
   1|true|yes|on)
     cmd+=(--vllm_enforce_eager)
+    ;;
+esac
+
+case "${EVAL_DO_SAMPLE,,}" in
+  1|true|yes|on)
+    cmd+=(--eval_do_sample)
     ;;
 esac
 
