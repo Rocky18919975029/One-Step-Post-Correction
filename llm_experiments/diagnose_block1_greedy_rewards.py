@@ -26,10 +26,6 @@ def shard_bounds(total_rows, num_shards, shard_idx):
     return start, end
 
 
-def bool_arg(value):
-    return str(value).lower() in {"1", "true", "yes", "on"}
-
-
 def build_anchor_prefix(tokenizer, row, anchor_tokens):
     completion_ids = tokenizer.encode(str(row["completion"]), add_special_tokens=False)
     anchor_ids = completion_ids[: min(anchor_tokens, len(completion_ids))]
@@ -103,6 +99,9 @@ def run_worker(args):
     result = pd.DataFrame(
         {
             "row_idx": list(range(start, end)),
+            "source_row_idx": shard_df["source_row_idx"].tolist()
+            if "source_row_idx" in shard_df.columns
+            else list(range(start, end)),
             "block_idx": shard_df["block_idx"].tolist(),
             "example_idx": shard_df["example_idx"].tolist(),
             "sample_idx": shard_df["sample_idx"].tolist(),
@@ -144,6 +143,8 @@ def merge_shards(args, shard_paths):
 
     summary = {
         "rows": int(len(diag)),
+        "questions": int(diag["example_idx"].nunique()),
+        "sample_num_questions": int(args.sample_num_questions),
         "original_reward_mean": float(original.mean()),
         "block1_greedy_reward_mean": float(greedy.mean()),
         "same_reward_rate": float((original == greedy).mean()),
@@ -177,6 +178,29 @@ def run_controller(args):
         shutil.rmtree(shard_dir)
     shard_dir.mkdir(parents=True, exist_ok=True)
 
+    selected_buffer_path = args.buffer_path
+    if args.sample_num_questions > 0:
+        full_df = pd.read_csv(args.buffer_path)
+        unique_examples = sorted(full_df["example_idx"].unique())
+        if args.sample_num_questions > len(unique_examples):
+            raise ValueError(
+                f"Requested {args.sample_num_questions} questions, but buffer only has {len(unique_examples)}."
+            )
+        sampled_examples = (
+            pd.Series(unique_examples)
+            .sample(n=args.sample_num_questions, random_state=args.seed)
+            .sort_values()
+            .tolist()
+        )
+        selected_df = full_df[full_df["example_idx"].isin(sampled_examples)].copy()
+        selected_df.insert(0, "source_row_idx", selected_df.index)
+        selected_buffer_path = str(output_dir / f"sampled_{args.sample_num_questions}_questions_seed{args.seed}.csv")
+        selected_df.to_csv(selected_buffer_path, index=False)
+        print(
+            f"Sampled {args.sample_num_questions} questions -> {len(selected_df)} rows: {selected_buffer_path}",
+            flush=True,
+        )
+
     processes = []
     shard_paths = []
     for shard_idx in range(args.num_shards):
@@ -186,7 +210,7 @@ def run_controller(args):
             sys.executable,
             str(Path(__file__).resolve()),
             "--worker",
-            "--buffer_path", args.buffer_path,
+            "--buffer_path", selected_buffer_path,
             "--output_dir", args.output_dir,
             "--model", args.model,
             "--anchor_tokens", str(args.anchor_tokens),
@@ -197,6 +221,7 @@ def run_controller(args):
             "--vllm_batch_size", str(args.vllm_batch_size),
             "--seed", str(args.seed),
             "--num_shards", str(args.num_shards),
+            "--sample_num_questions", "0",
             "--shard_idx", str(shard_idx),
             "--shard_output", str(shard_path),
         ]
@@ -250,6 +275,7 @@ def main():
     parser.add_argument("--vllm_disable_custom_all_reduce", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_shards", type=int, default=8)
+    parser.add_argument("--sample_num_questions", type=int, default=0)
     parser.add_argument("--save_greedy_completion", action="store_true")
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--shard_idx", type=int, default=None)
