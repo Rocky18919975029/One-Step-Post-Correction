@@ -91,6 +91,7 @@ def parse_float_list(value):
 
 def load_actor_model(args, device):
     actor_name = resolve_model_name(args.actor_model or args.model)
+    print(f"Resolved actor model: {args.actor_model or args.model} -> {actor_name}", flush=True)
     if args.full_finetune_actor:
         return load_reference_model(
             actor_name,
@@ -189,6 +190,7 @@ def score_text_pairs(
 
 def score_logprob_columns(df, args):
     model_name = resolve_model_name(args.model)
+    print(f"Resolved base model: {args.model} -> {model_name}", flush=True)
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -273,6 +275,7 @@ def score_logprob_columns(df, args):
 
 def score_prefix_flow_columns(df, args):
     model_name = resolve_model_name(args.model)
+    print(f"Resolved base model: {args.model} -> {model_name}", flush=True)
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token

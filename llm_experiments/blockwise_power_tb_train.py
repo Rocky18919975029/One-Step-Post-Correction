@@ -25,8 +25,69 @@ MODEL_NAME_BY_KEY = {
 }
 
 
+def cached_snapshot_for_repo(repo_id):
+    cache_roots = []
+    for env_name in ["HF_HUB_CACHE", "TRANSFORMERS_CACHE"]:
+        value = os.environ.get(env_name)
+        if value:
+            cache_roots.append(Path(value).expanduser())
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        cache_roots.append(Path(hf_home).expanduser() / "hub")
+    cache_roots.append(Path.home() / ".cache" / "huggingface" / "hub")
+
+    cache_dir_name = "models--" + repo_id.replace("/", "--")
+    for cache_root in cache_roots:
+        snapshots_dir = cache_root / cache_dir_name / "snapshots"
+        if not snapshots_dir.exists():
+            continue
+        candidates = [
+            path
+            for path in snapshots_dir.iterdir()
+            if path.is_dir() and (path / "config.json").exists()
+        ]
+        if candidates:
+            candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+            return str(candidates[0])
+    return None
+
+
+def infer_repo_id_from_missing_path(model):
+    name = Path(model).name.lower()
+    compact = name.replace("_", "-")
+    if "qwen2.5-math-7b" in compact:
+        return "Qwen/Qwen2.5-Math-7B"
+    if "qwen2.5-7b" in compact:
+        return "Qwen/Qwen2.5-7B"
+    if "qwen2.5-0.5b" in compact:
+        return "Qwen/Qwen2.5-0.5B"
+    return None
+
+
 def resolve_model_name(model):
-    return MODEL_NAME_BY_KEY.get(model, model)
+    if Path(str(model)).expanduser().exists():
+        return str(Path(str(model)).expanduser())
+
+    repo_id = MODEL_NAME_BY_KEY.get(model)
+    if repo_id is None:
+        repo_id = infer_repo_id_from_missing_path(str(model))
+    if repo_id is None and "/" in str(model) and not str(model).startswith("/"):
+        repo_id = str(model)
+
+    if repo_id is not None:
+        cached_snapshot = cached_snapshot_for_repo(repo_id)
+        if cached_snapshot is not None:
+            return cached_snapshot
+        return repo_id
+
+    return model
+
+
+def describe_model_resolution(model):
+    resolved = resolve_model_name(model)
+    if resolved != model:
+        return f"{model} -> {resolved}"
+    return str(model)
 
 
 def resolve_prompt_model_key(model, prompt_model=None):
