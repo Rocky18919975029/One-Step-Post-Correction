@@ -34,10 +34,16 @@ def cached_snapshot_for_repo(repo_id):
     hf_home = os.environ.get("HF_HOME")
     if hf_home:
         cache_roots.append(Path(hf_home).expanduser() / "hub")
+    cache_roots.append(Path.home() / "hf_cache" / "hub")
     cache_roots.append(Path.home() / ".cache" / "huggingface" / "hub")
 
     cache_dir_name = "models--" + repo_id.replace("/", "--")
+    seen_roots = set()
     for cache_root in cache_roots:
+        cache_root = cache_root.resolve() if cache_root.exists() else cache_root
+        if cache_root in seen_roots:
+            continue
+        seen_roots.add(cache_root)
         snapshots_dir = cache_root / cache_dir_name / "snapshots"
         if not snapshots_dir.exists():
             continue
