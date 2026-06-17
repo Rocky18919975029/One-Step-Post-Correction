@@ -52,6 +52,19 @@ def cached_snapshot_for_repo(repo_id):
     return None
 
 
+def is_complete_model_dir(path):
+    path = Path(path)
+    if not path.is_dir() or not (path / "config.json").exists():
+        return False
+    tokenizer_files = [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json",
+        "spiece.model",
+    ]
+    return any((path / name).exists() for name in tokenizer_files)
+
+
 def infer_repo_id_from_missing_path(model):
     name = Path(model).name.lower()
     compact = name.replace("_", "-")
@@ -65,8 +78,9 @@ def infer_repo_id_from_missing_path(model):
 
 
 def resolve_model_name(model):
-    if Path(str(model)).expanduser().exists():
-        return str(Path(str(model)).expanduser())
+    model_path = Path(str(model)).expanduser()
+    if is_complete_model_dir(model_path):
+        return str(model_path)
 
     repo_id = MODEL_NAME_BY_KEY.get(model)
     if repo_id is None:
